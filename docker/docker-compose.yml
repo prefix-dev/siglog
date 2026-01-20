@@ -1,0 +1,135 @@
+# Local development setup for rust-tessera transparency log ecosystem
+#
+# Setup:
+#   uv run scripts/setup_local.py   # Generates .env with keys
+#
+# Usage:
+#   docker compose build
+#   docker compose up
+#
+# This runs three services:
+#   - log: The transparency log server (port 8080)
+#   - witness: A Rust witness server (port 8081)
+#   - monitor: The conda monitor with validation (port 8082)
+#
+# Test endpoints:
+#   curl http://localhost:8080/health      # Log health
+#   curl http://localhost:8080/checkpoint  # Current checkpoint
+#   curl http://localhost:8081/health      # Rust witness health
+#   curl http://localhost:8082/health      # Monitor health
+#   curl http://localhost:8082/stats       # Monitor stats
+
+services:
+  log:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command:
+      - rust-tessera
+      - --database-url=sqlite:/data/tessera.db?mode=rwc
+      - --storage-backend=fs
+      - --fs-root=/data/tiles
+      - --origin=local.dev/log
+      - --private-key=${LOG_PRIVATE_KEY}
+      - --listen=0.0.0.0:8080
+      - --checkpoint-interval=1
+      - --batch-max-size=256
+      - --batch-max-age-ms=500
+      - --vindex-enabled
+      - --vindex-key-field=name
+      - --external-witnesses=witness=http://witness:8080,monitor=http://monitor:8080
+    environment:
+      RUST_LOG: info,rust_tessera=debug
+    ports:
+      - "8080:8080"
+    volumes:
+      - log-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  witness:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command:
+      - witness
+      - --database-url=sqlite:/data/witness.db?mode=rwc
+      - --private-key=${WITNESS_PRIVATE_KEY}
+      - --listen=0.0.0.0:8080
+      - --log=local.dev/log=${LOG_PUBLIC_KEY}
+    environment:
+      RUST_LOG: info,witness=debug,rust_tessera=debug
+    ports:
+      - "8081:8080"
+    volumes:
+      - witness-data:/data
+    depends_on:
+      log:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Go witness using litewitness from filippo.io/litetlog
+  # Currently disabled due to build issues. To enable:
+  # 1. Uncomment this service
+  # 2. Add litewitness=http://litewitness:8080 to log's --external-witnesses
+  # 3. Add depends_on: litewitness to log service
+  # litewitness:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.litewitness
+  #   environment:
+  #     LITEWITNESS_PRIVATE_KEY: ${LITEWITNESS_PRIVATE_KEY}
+  #     LITEWITNESS_NAME: local.dev/litewitness
+  #     LITEWITNESS_DB: /data/litewitness.db
+  #     LITEWITNESS_LISTEN: 0.0.0.0:8080
+  #     LOG_ORIGIN: local.dev/log
+  #     LOG_PUBLIC_KEY: ${LOG_PUBLIC_KEY}
+  #   ports:
+  #     - "8083:8080"
+  #   volumes:
+  #     - litewitness-data:/data
+  #   healthcheck:
+  #     test: ["CMD", "nc", "-z", "localhost", "8080"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 10
+  #     start_period: 15s
+
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    command:
+      - conda-monitor
+      - --database-url=sqlite:/data/monitor.db?mode=rwc
+      - --private-key=${MONITOR_PRIVATE_KEY}
+      - --listen=0.0.0.0:8080
+      - --log=local.dev/log=${LOG_PUBLIC_KEY}=http://log:8080
+    environment:
+      RUST_LOG: info,conda_monitor=debug,rust_tessera=debug
+    ports:
+      - "8082:8080"
+    volumes:
+      - monitor-data:/data
+    depends_on:
+      log:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  log-data:
+  witness-data:
+  monitor-data:
+  # litewitness-data:

@@ -1,0 +1,189 @@
+{
+  "description": "Test vectors from litetlog/torchwood for tlog-witness protocol",
+  "source": "https://github.com/FiloSottile/litetlog/blob/main/cmd/litewitness/testdata/litewitness.txt",
+  "seed": "b4e385f4358f7373cfa9184b176f3cccf808e795baf04092ddfde9461014f0c4",
+  "log": {
+    "public_key_hex": "ffdc2d4d98e4124d3feaf788c0c2f9abfd796083d1f0495437f302ec79cf100f",
+    "origin": "sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562",
+    "note_vkey": "sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562+52022899+ARD9wtTZjkEk0/6veIwML5q/15YIPfBJVDfzAux5zxAP"
+  },
+  "witness": {
+    "name": "example.com/witness",
+    "key_hash": "e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a"
+  },
+  "leaves": [
+    {"index": 0, "hash_hex": "2a00000000000000000000000000000000000000000000000000000000000000"},
+    {"index": 1, "hash_hex": "2a01000000000000000000000000000000000000000000000000000000000000"},
+    {"index": 2, "hash_hex": "2a02000000000000000000000000000000000000000000000000000000000000"},
+    {"index": 3, "hash_hex": "2a03000000000000000000000000000000000000000000000000000000000000"},
+    {"index": 4, "hash_hex": "2a04000000000000000000000000000000000000000000000000000000000000"}
+  ],
+  "checkpoints": [
+    {
+      "size": 1,
+      "root_hash_base64": "KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "root_hash_hex": "2a00000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "size": 3,
+      "root_hash_base64": "RcCI1Nk56ZcSmIEfIn0SleqtV7uvrlXNccFx595Iwl0=",
+      "root_hash_hex": "45c088d4d939e997129881f227d1295eaad57bbbafae55cd71c171e7de48c25d"
+    },
+    {
+      "size": 5,
+      "root_hash_base64": "QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=",
+      "root_hash_hex": "42bb57ad06420afa4882c4a63ac6a1ec77480b330b2f20dfc53a0caa5f564e36"
+    }
+  ],
+  "consistency_proofs": [
+    {
+      "old_size": 1,
+      "new_size": 3,
+      "proof_hashes_base64": [
+        "KgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "KgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      ],
+      "proof_hashes_hex": [
+        "2a01000000000000000000000000000000000000000000000000000000000000",
+        "2a02000000000000000000000000000000000000000000000000000000000000"
+      ]
+    },
+    {
+      "old_size": 1,
+      "new_size": 5,
+      "proof_hashes_base64": [
+        "KgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "+fUDV+k970B4I3uKrqJM4aP1lloPZP8mvr2Z4wRw2LI=",
+        "KgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      ],
+      "proof_hashes_hex": [
+        "2a01000000000000000000000000000000000000000000000000000000000000",
+        "f9f50357e93def407823f7b8aaea24ce1a3f5965a0f64ff26bebdd9e30470d8b2",
+        "2a04000000000000000000000000000000000000000000000000000000000000"
+      ]
+    },
+    {
+      "old_size": 3,
+      "new_size": 5,
+      "proof_hashes_base64": [
+        "KgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "KgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "wgiIFdZfYNv6WU1OllBKsWnLYIS/DBMqt8Uh/S4OukE=",
+        "KgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      ],
+      "proof_hashes_hex": [
+        "2a02000000000000000000000000000000000000000000000000000000000000",
+        "2a03000000000000000000000000000000000000000000000000000000000000",
+        "c20888155665f0dbfa594d4e9650b4b169cb6084bf0c132ab7c521fd2e0eba41",
+        "2a04000000000000000000000000000000000000000000000000000000000000"
+      ]
+    }
+  ],
+  "test_cases": [
+    {
+      "name": "initial_checkpoint_size_1",
+      "old_size": 0,
+      "checkpoint_size": 1,
+      "checkpoint_root_base64": "KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "proof_hashes_base64": [],
+      "expected_status": 200
+    },
+    {
+      "name": "consistency_1_to_3_invalid_signature",
+      "old_size": 1,
+      "checkpoint_size": 3,
+      "checkpoint_root_base64": "RcCI1Nk56ZcSmIEfIn0SleqtV7uvrlXNccFx595Iwl0=",
+      "proof_hashes_base64": [
+        "KgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "KgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      ],
+      "expected_status": 403,
+      "expected_error": "invalid signature",
+      "note": "Signature is from wrong key"
+    },
+    {
+      "name": "consistency_1_to_3_unknown_log",
+      "old_size": 1,
+      "checkpoint_size": 3,
+      "checkpoint_root_base64": "RcCI1Nk56ZcSmIEfIn0SleqtV7uvrlXNccFx595Iwl0=",
+      "origin": "sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e563",
+      "proof_hashes_base64": [
+        "KgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "KgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      ],
+      "expected_status": 403,
+      "expected_error": "unknown log",
+      "note": "Origin differs by one character at end"
+    },
+    {
+      "name": "consistency_1_to_3_missing_proof",
+      "old_size": 1,
+      "checkpoint_size": 3,
+      "checkpoint_root_base64": "RcCI1Nk56ZcSmIEfIn0SleqtV7uvrlXNccFx595Iwl0=",
+      "proof_hashes_base64": [],
+      "expected_status": 422,
+      "expected_error": "consistency proof"
+    },
+    {
+      "name": "consistency_1_to_3_bad_proof_hash",
+      "old_size": 1,
+      "checkpoint_size": 3,
+      "checkpoint_root_base64": "RcCI1Nk56ZcSmIEfIn0SleqtV7uvrlXNccFx595Iwl0=",
+      "proof_hashes_base64": [
+        "KgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "KgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABA="
+      ],
+      "expected_status": 422,
+      "expected_error": "consistency proof",
+      "note": "Second hash has wrong last byte (0x10 instead of 0x00)"
+    },
+    {
+      "name": "consistency_1_to_3_success",
+      "old_size": 1,
+      "checkpoint_size": 3,
+      "checkpoint_root_base64": "RcCI1Nk56ZcSmIEfIn0SleqtV7uvrlXNccFx595Owl0=",
+      "proof_hashes_base64": [
+        "KgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "KgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      ],
+      "expected_status": 200
+    },
+    {
+      "name": "consistency_1_to_5_conflict",
+      "old_size": 1,
+      "checkpoint_size": 5,
+      "checkpoint_root_base64": "QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=",
+      "proof_hashes_base64": [
+        "KgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "+fUDV+k970B4I3uKrqJM4aP1lloPZP8mvr2Z4wRw2LI=",
+        "KgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      ],
+      "expected_status": 409,
+      "expected_body": "3\n",
+      "note": "Witness already at size 3, returns conflict"
+    },
+    {
+      "name": "consistency_3_to_5_success",
+      "old_size": 3,
+      "checkpoint_size": 5,
+      "checkpoint_root_base64": "QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=",
+      "proof_hashes_base64": [
+        "KgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "KgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "wgiIFdZfYNv6WU1OllBKsWnLYIS/DBMqt8Uh/S4OukE=",
+        "KgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      ],
+      "expected_status": 200
+    },
+    {
+      "name": "consistency_0_to_5_conflict",
+      "old_size": 0,
+      "checkpoint_size": 5,
+      "checkpoint_root_base64": "QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=",
+      "proof_hashes_base64": [],
+      "expected_status": 409,
+      "expected_body": "5\n",
+      "note": "Witness already at size 5, returns conflict"
+    }
+  ]
+}

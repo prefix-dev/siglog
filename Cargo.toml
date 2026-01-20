@@ -1,0 +1,84 @@
+[package]
+name = "rust-tessera"
+version = "0.1.0"
+edition = "2021"
+description = "A minimal Tessera-compatible transparency log server"
+license = "Apache-2.0"
+
+[lib]
+name = "rust_tessera"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rust-tessera"
+path = "src/main.rs"
+
+[[bin]]
+name = "witness"
+path = "src/bin/witness.rs"
+
+[[bin]]
+name = "conda-log-ingest"
+path = "src/bin/conda_log_ingest.rs"
+
+[[bin]]
+name = "conda-log-verify"
+path = "src/bin/conda_log_verify.rs"
+
+[[bin]]
+name = "conda-monitor"
+path = "src/bin/conda_monitor.rs"
+
+[dependencies]
+# Web framework
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Storage
+opendal = { version = "0.51", features = ["services-s3", "services-memory", "services-fs"] }
+sea-orm = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-postgres", "sqlx-sqlite"] }
+sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-postgres", "sqlx-sqlite"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Merkle tree (path dependencies from sigstore-rust)
+sigstore-merkle = "0.6.0"
+sigstore-types = "0.6.0"
+sigstore-crypto = "0.6.0"
+
+# CLI and config
+clap = { version = "4", features = ["derive", "env"] }
+
+# Cryptography
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+sha2 = "0.10"
+
+# Serialization
+base64 = "0.22"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async utilities
+async-trait = "0.1"
+async-recursion = "1"
+futures = "0.3"
+
+# HTTP client for CLI tools
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+indicatif = "0.17"
+
+[dev-dependencies]
+tempfile = "3"
+portpicker = "0.1"
+wiremock = "0.6"
+tower = "0.5"
