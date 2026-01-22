@@ -1,0 +1,12 @@
+{
+  "name": "invalid_base64_proof_fail",
+  "description": "Proof with invalid base64 encoding",
+  "should_fail": true,
+  "old_size": 1,
+  "new_size": 3,
+  "proof": [
+    "not!!!valid!!!base64"
+  ],
+  "root_hash": "RcCI1Nk56ZcSmIEfIn0SleqtV7uvrlXNccFx595Iwl0=",
+  "expected_status": 400
+}

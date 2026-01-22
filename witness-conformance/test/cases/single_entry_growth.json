@@ -1,0 +1,14 @@
+{
+  "name": "single_entry_growth",
+  "description": "Minimal growth (add one entry)",
+  "should_fail": false,
+  "old_size": 10,
+  "new_size": 11,
+  "proof": [
+    "lRfL8xx5EXPt2174iNdGZpO0GcSHyfaJEo5cWI377v4=",
+    "KgoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "ukvHpqwJdBDYbj2CU3OSzsfB4Oottn3YgO01mw2XU+I="
+  ],
+  "root_hash": "ni3U3kkFewZLGV7YSWlmQY9Ed4JEys1aGNGtCt2yH6g=",
+  "expected_status": 200
+}

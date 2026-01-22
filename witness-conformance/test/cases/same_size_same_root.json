@@ -1,0 +1,10 @@
+{
+  "name": "same_size_same_root",
+  "description": "Resubmit same checkpoint (idempotent)",
+  "should_fail": false,
+  "old_size": 5,
+  "new_size": 5,
+  "proof": [],
+  "root_hash": "QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=",
+  "expected_status": 200
+}

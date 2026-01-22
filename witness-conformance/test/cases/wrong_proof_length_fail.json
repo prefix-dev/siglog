@@ -1,0 +1,12 @@
+{
+  "name": "wrong_proof_length_fail",
+  "description": "Consistency proof with wrong number of hashes",
+  "should_fail": true,
+  "old_size": 1,
+  "new_size": 3,
+  "proof": [
+    "KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  ],
+  "root_hash": "RcCI1Nk56ZcSmIEfIn0SleqtV7uvrlXNccFx595Iwl0=",
+  "expected_status": 422
+}

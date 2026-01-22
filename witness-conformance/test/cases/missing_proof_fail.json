@@ -1,0 +1,10 @@
+{
+  "name": "missing_proof_fail",
+  "description": "Missing consistency proof when required",
+  "should_fail": true,
+  "old_size": 1,
+  "new_size": 5,
+  "proof": [],
+  "root_hash": "QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=",
+  "expected_status": 422
+}

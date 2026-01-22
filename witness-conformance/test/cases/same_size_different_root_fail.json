@@ -1,0 +1,10 @@
+{
+  "name": "same_size_different_root_fail",
+  "description": "Same size but different root indicates split-view attack",
+  "should_fail": true,
+  "old_size": 3,
+  "new_size": 3,
+  "proof": [],
+  "root_hash": "OlqUrJmDOfS1pP0gl/n218A7cc76h9JzICXO2WqYxlo=",
+  "expected_status": 422
+}

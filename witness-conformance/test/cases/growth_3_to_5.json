@@ -1,0 +1,15 @@
+{
+  "name": "growth_3_to_5",
+  "description": "Valid checkpoint update from size 3 to 5",
+  "should_fail": false,
+  "old_size": 3,
+  "new_size": 5,
+  "proof": [
+    "KgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "KgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "wgiIFdZfYNv6WU1OllBKsWnLYIS/DBMqt8Uh/S4OukE=",
+    "KgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  ],
+  "root_hash": "QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=",
+  "expected_status": 200
+}

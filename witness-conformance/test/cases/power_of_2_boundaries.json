@@ -1,0 +1,17 @@
+{
+  "name": "power_of_2_boundaries",
+  "description": "Growth across power-of-2 boundaries",
+  "should_fail": false,
+  "old_size": 15,
+  "new_size": 17,
+  "proof": [
+    "Kg4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "Kg8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "bBqEc7Fnilwt/XMQ0x8ZK6Q5rrAlLrELsrml0LTd8h4=",
+    "i9Rh3k+x+koX4vOT4xzFsnXCA2120J63HViIhAWT5Tw=",
+    "ukvHpqwJdBDYbj2CU3OSzsfB4Oottn3YgO01mw2XU+I=",
+    "KhAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  ],
+  "root_hash": "z2R59BhIBM/Xb/fldQb4UFw2zAA29wvZiADQc+Lhz7E=",
+  "expected_status": 200
+}

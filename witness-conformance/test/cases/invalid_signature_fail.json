@@ -1,0 +1,11 @@
+{
+  "name": "invalid_signature_fail",
+  "description": "Checkpoint with invalid signature should fail",
+  "should_fail": true,
+  "old_size": 0,
+  "new_size": 1,
+  "proof": [],
+  "root_hash": "KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "expected_status": 403,
+  "checkpoint_valid": false
+}

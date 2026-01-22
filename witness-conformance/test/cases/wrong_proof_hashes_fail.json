@@ -1,0 +1,13 @@
+{
+  "name": "wrong_proof_hashes_fail",
+  "description": "Consistency proof with wrong hash values",
+  "should_fail": true,
+  "old_size": 1,
+  "new_size": 3,
+  "proof": [
+    "jzsly1+4BV4suYbOOFlLHpMxQxjLwEY3FUSlT7LSLTo=",
+    "v/ItLBOwTFjNlrt4K0VxyzqN7fDR26wr9q8/T8q6jn4="
+  ],
+  "root_hash": "RcCI1Nk56ZcSmIEfIn0SleqtV7uvrlXNccFx595Iwl0=",
+  "expected_status": 422
+}

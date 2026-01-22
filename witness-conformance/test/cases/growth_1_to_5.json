@@ -1,0 +1,14 @@
+{
+  "name": "growth_1_to_5",
+  "description": "Growth spanning multiple levels (1 to 5)",
+  "should_fail": false,
+  "old_size": 1,
+  "new_size": 5,
+  "proof": [
+    "KgEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "+fUDV+k970B4I3uKrqJM4aP1lloPZP8mvr2Z4wRw2LI=",
+    "KgQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  ],
+  "root_hash": "QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=",
+  "expected_status": 200
+}

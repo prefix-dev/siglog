@@ -1,0 +1,12 @@
+{
+  "name": "growth_2_to_3",
+  "description": "Growth from power-of-2 to non-power-of-2",
+  "should_fail": false,
+  "old_size": 2,
+  "new_size": 3,
+  "proof": [
+    "KgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+  ],
+  "root_hash": "RcCI1Nk56ZcSmIEfIn0SleqtV7uvrlXNccFx595Iwl0=",
+  "expected_status": 200
+}

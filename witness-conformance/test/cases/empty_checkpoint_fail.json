@@ -1,0 +1,9 @@
+{
+  "name": "empty_checkpoint_fail",
+  "description": "Empty checkpoint text",
+  "should_fail": true,
+  "old_size": 0,
+  "new_size": 0,
+  "proof": [],
+  "root_hash": ""
+}

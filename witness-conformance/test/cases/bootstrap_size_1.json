@@ -1,0 +1,10 @@
+{
+  "name": "bootstrap_size_1",
+  "description": "Bootstrap witness with first checkpoint at size 1",
+  "should_fail": false,
+  "old_size": 0,
+  "new_size": 1,
+  "proof": [],
+  "root_hash": "KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "expected_status": 200
+}

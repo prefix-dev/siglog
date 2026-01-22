@@ -1,0 +1,12 @@
+{
+  "name": "growth_4_to_8",
+  "description": "Growth between powers of 2",
+  "should_fail": false,
+  "old_size": 4,
+  "new_size": 8,
+  "proof": [
+    "ZNxdU4pbNzxm4tIgmsxujfj4Jb7UTCaPorcIi6yctYs="
+  ],
+  "root_hash": "ukvHpqwJdBDYbj2CU3OSzsfB4Oottn3YgO01mw2XU+I=",
+  "expected_status": 200
+}

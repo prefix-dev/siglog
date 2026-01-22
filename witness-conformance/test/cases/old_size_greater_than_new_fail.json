@@ -1,0 +1,10 @@
+{
+  "name": "old_size_greater_than_new_fail",
+  "description": "old_size > new_size is invalid",
+  "should_fail": true,
+  "old_size": 10,
+  "new_size": 5,
+  "proof": [],
+  "root_hash": "QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=",
+  "expected_status": 400
+}

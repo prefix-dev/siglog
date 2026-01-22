@@ -1,0 +1,16 @@
+{
+  "name": "growth_7_to_15",
+  "description": "Growth from non-power-of-2 to non-power-of-2",
+  "should_fail": false,
+  "old_size": 7,
+  "new_size": 15,
+  "proof": [
+    "KgYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "KgcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "x1ZYqVSHQoiOaAwigq9U+A+b+2Av45zAnj91yAEugoc=",
+    "h0qZ4yRieP7aZa0u+hHf31Rd07es27KAsQnP2SlRCwE=",
+    "g6L5coh6Zh0Y0W7n8KHNGwTp8s6X8y9CaeE8Si+dtEQ="
+  ],
+  "root_hash": "3lRJUDJHz+wH+jzxnMG8rXbKPPvFj3jPofM8XiyTVrI=",
+  "expected_status": 200
+}
