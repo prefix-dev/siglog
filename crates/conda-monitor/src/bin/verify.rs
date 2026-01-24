@@ -9,11 +9,11 @@
 //!                    --repodata-url https://conda.anaconda.org/robostack-humble/linux-64/repodata.json
 
 use clap::Parser;
+use conda_monitor::RepodataEntry;
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Conda repodata verification tool for tessera transparency logs.
@@ -65,108 +65,6 @@ struct ProofNode {
     label_bit_len: u32,
     label_path: String,
     hash: String,
-}
-
-/// Normalized repodata entry for hashing
-#[derive(Debug, Serialize)]
-struct NormalizedEntry {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attestation_sha256: Option<String>,
-    build: String,
-    build_number: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    constrains: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    depends: Option<Vec<String>>,
-    filename: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    license: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    license_family: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    md5: Option<String>,
-    name: String,
-    sha256: String,
-    size: u64,
-    subdir: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    timestamp: Option<u64>,
-    version: String,
-}
-
-impl NormalizedEntry {
-    fn from_repodata(filename: &str, subdir: &str, entry: &Value) -> Option<Self> {
-        let obj = entry.as_object()?;
-
-        let name = obj.get("name")?.as_str()?.to_string();
-        let version = obj.get("version")?.as_str()?.to_string();
-        let build = obj.get("build")?.as_str()?.to_string();
-        let build_number = obj.get("build_number")?.as_u64()?;
-        let sha256 = obj.get("sha256")?.as_str()?.to_string();
-        let size = obj.get("size")?.as_u64()?;
-
-        let md5 = obj.get("md5").and_then(|v| v.as_str()).map(String::from);
-        let timestamp = obj.get("timestamp").and_then(|v| v.as_u64());
-        let license = obj
-            .get("license")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let license_family = obj
-            .get("license_family")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let depends = obj.get("depends").and_then(|v| {
-            let arr: Vec<String> = v
-                .as_array()?
-                .iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect();
-            if arr.is_empty() {
-                None
-            } else {
-                Some(arr)
-            }
-        });
-
-        let constrains = obj.get("constrains").and_then(|v| {
-            let arr: Vec<String> = v
-                .as_array()?
-                .iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect();
-            if arr.is_empty() {
-                None
-            } else {
-                Some(arr)
-            }
-        });
-
-        Some(Self {
-            attestation_sha256: None,
-            build,
-            build_number,
-            constrains,
-            depends,
-            filename: filename.to_string(),
-            license,
-            license_family,
-            md5,
-            name,
-            sha256,
-            size,
-            subdir: subdir.to_string(),
-            timestamp,
-            version,
-        })
-    }
-
-    fn to_normalized_json(&self) -> Vec<u8> {
-        let value = serde_json::to_value(self).expect("serialization should not fail");
-        let map: BTreeMap<String, Value> =
-            serde_json::from_value(value).expect("should be an object");
-        serde_json::to_vec(&map).expect("serialization should not fail")
-    }
 }
 
 /// Compute RFC 6962 leaf hash
@@ -263,7 +161,7 @@ fn main() -> anyhow::Result<()> {
     let lookup_resp: LookupResponse = client.get(&lookup_url).send()?.json()?;
 
     if !lookup_resp.found {
-        println!("\n❌ VERIFICATION FAILED: Filename not found in log");
+        println!("\n[X] VERIFICATION FAILED: Filename not found in log");
         println!("   The package '{}' has not been logged.", args.filename);
         return Ok(());
     }
@@ -307,8 +205,9 @@ fn main() -> anyhow::Result<()> {
             });
 
         if let Some(entry) = entry {
-            let normalized = NormalizedEntry::from_repodata(&args.filename, &args.subdir, entry)
-                .ok_or_else(|| anyhow::anyhow!("Failed to normalize repodata entry"))?;
+            let normalized =
+                RepodataEntry::from_repodata(&args.filename, &args.subdir, entry, None)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to normalize repodata entry"))?;
 
             let json_bytes = normalized.to_normalized_json();
 
@@ -324,7 +223,7 @@ fn main() -> anyhow::Result<()> {
 
             Some(leaf_hash)
         } else {
-            println!("   ⚠️  Entry not found in repodata");
+            println!("   [!] Entry not found in repodata");
             None
         }
     } else {
@@ -358,7 +257,7 @@ fn main() -> anyhow::Result<()> {
         let bundle_resp = client.get(&entries_url).send()?;
         if !bundle_resp.status().is_success() {
             println!(
-                "   ⚠️  Failed to fetch entry bundle: {}",
+                "   [!] Failed to fetch entry bundle: {}",
                 bundle_resp.status()
             );
             continue;
@@ -402,11 +301,11 @@ fn main() -> anyhow::Result<()> {
             if let Some(expected) = expected_hash {
                 if entry_leaf_hash == expected {
                     found_match = true;
-                    println!("   ✓ Found matching entry at index {}", log_index);
+                    println!("   [OK] Found matching entry at index {}", log_index);
                 }
             }
         } else {
-            println!("   ⚠️  Could not decode entry at offset {}", offset);
+            println!("   [!] Could not decode entry at offset {}", offset);
         }
     }
 
@@ -452,11 +351,11 @@ fn main() -> anyhow::Result<()> {
 
     if expected_hash.is_some() {
         if found_match {
-            println!("\n✅ VERIFICATION PASSED");
+            println!("\n[OK] VERIFICATION PASSED");
             println!("   The repodata entry matches an entry in the transparency log.");
             println!("   This confirms the mirror is serving the officially logged metadata.");
         } else {
-            println!("\n❌ VERIFICATION FAILED");
+            println!("\n[X] VERIFICATION FAILED");
             println!("   The repodata entry does not match any logged entry.");
             println!("   This could indicate:");
             println!("   - The repodata has been modified (possibly a patch not yet logged)");
@@ -464,7 +363,7 @@ fn main() -> anyhow::Result<()> {
             println!("   - The entry was logged with different normalization");
         }
     } else {
-        println!("\n✓ Entry exists in log (full verification requires --repodata-url or --repodata-file)");
+        println!("\n[OK] Entry exists in log (full verification requires --repodata-url or --repodata-file)");
     }
 
     Ok(())

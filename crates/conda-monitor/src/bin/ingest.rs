@@ -9,10 +9,10 @@
 //!                    --subdir linux-64
 
 use clap::Parser;
+use conda_monitor::RepodataEntry;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::blocking::Client;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -48,113 +48,6 @@ struct Args {
     /// Request timeout in seconds
     #[arg(long, default_value = "30")]
     timeout: u64,
-}
-
-/// Normalized repodata entry matching the CEP spec.
-#[derive(Debug, serde::Serialize)]
-struct NormalizedEntry {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attestation_sha256: Option<String>,
-    build: String,
-    build_number: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    constrains: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    depends: Option<Vec<String>>,
-    filename: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    license: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    license_family: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    md5: Option<String>,
-    name: String,
-    sha256: String,
-    size: u64,
-    subdir: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    timestamp: Option<u64>,
-    version: String,
-}
-
-impl NormalizedEntry {
-    fn from_repodata(filename: &str, subdir: &str, entry: &Value) -> Option<Self> {
-        let obj = entry.as_object()?;
-
-        // Required fields
-        let name = obj.get("name")?.as_str()?.to_string();
-        let version = obj.get("version")?.as_str()?.to_string();
-        let build = obj.get("build")?.as_str()?.to_string();
-        let build_number = obj.get("build_number")?.as_u64()?;
-        let sha256 = obj.get("sha256")?.as_str()?.to_string();
-        let size = obj.get("size")?.as_u64()?;
-
-        // Optional fields
-        let md5 = obj.get("md5").and_then(|v| v.as_str()).map(String::from);
-        let timestamp = obj.get("timestamp").and_then(|v| v.as_u64());
-        let license = obj
-            .get("license")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let license_family = obj
-            .get("license_family")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        // Depends (omit if empty)
-        let depends = obj.get("depends").and_then(|v| {
-            let arr: Vec<String> = v
-                .as_array()?
-                .iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect();
-            if arr.is_empty() {
-                None
-            } else {
-                Some(arr)
-            }
-        });
-
-        // Constrains (omit if empty)
-        let constrains = obj.get("constrains").and_then(|v| {
-            let arr: Vec<String> = v
-                .as_array()?
-                .iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect();
-            if arr.is_empty() {
-                None
-            } else {
-                Some(arr)
-            }
-        });
-
-        Some(Self {
-            attestation_sha256: None,
-            build,
-            build_number,
-            constrains,
-            depends,
-            filename: filename.to_string(),
-            license,
-            license_family,
-            md5,
-            name,
-            sha256,
-            size,
-            subdir: subdir.to_string(),
-            timestamp,
-            version,
-        })
-    }
-
-    fn to_normalized_json(&self) -> Vec<u8> {
-        // Use BTreeMap for sorted keys
-        let value = serde_json::to_value(self).expect("serialization should not fail");
-        let map: std::collections::BTreeMap<String, Value> =
-            serde_json::from_value(value).expect("should be an object");
-        serde_json::to_vec(&map).expect("serialization should not fail")
-    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -225,8 +118,10 @@ fn main() -> anyhow::Result<()> {
     for (filename, entry) in all_packages.into_iter().take(total) {
         pb.set_message(filename.to_string());
 
-        // Normalize entry
-        let Some(normalized) = NormalizedEntry::from_repodata(filename, &args.subdir, entry) else {
+        // Normalize entry using the library
+        let Some(normalized) =
+            RepodataEntry::from_repodata(filename, &args.subdir, entry, None)
+        else {
             skip_count += 1;
             pb.inc(1);
             continue;

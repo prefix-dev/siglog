@@ -7,8 +7,9 @@
 //! It implements the C2SP tlog-witness specification with additional validation.
 
 use clap::Parser;
-use rust_tessera::monitor::{handlers, CondaMonitor, MonitoringWitness};
-use rust_tessera::witness::LogConfig;
+use conda_monitor::{CondaMonitor, LogConfig, MonitoringWitness};
+use rust_tessera::checkpoint::CheckpointSigner;
+use rust_tessera::monitor::handlers;
 use sea_orm::{ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::sync::Arc;
@@ -92,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize signer
     let signer = Arc::new(
-        rust_tessera::checkpoint::CheckpointSigner::from_note_key(&args.private_key)
+        CheckpointSigner::from_note_key(&args.private_key)
             .map_err(|e| anyhow::anyhow!("invalid private key: {}", e))?,
     );
     tracing::info!("Witness signer initialized: {}", signer.name());

@@ -3,12 +3,13 @@
 //! This library provides:
 //! - Transparency log server functionality
 //! - Witness server for co-signing checkpoints
-//! - Monitor for validating log contents
+//! - Monitor infrastructure for validating log contents
 //! - Verifiable index for key lookups
+//!
+//! For Conda-specific monitoring functionality, see the `conda-monitor` crate.
 
 pub mod api;
 pub mod checkpoint;
-pub mod conda;
 pub mod error;
 pub mod merkle;
 pub mod migration;

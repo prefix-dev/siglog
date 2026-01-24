@@ -11,11 +11,11 @@
 //! Keys are stored as SHA256 hashes for space efficiency. Values (like the
 //! SHA256 associated with a filename) are stored verbatim for conflict reporting.
 
-use super::{
+use async_trait::async_trait;
+use rust_tessera::error::Result;
+use rust_tessera::monitor::{
     ContentIndex, ContentIndexStore, Monitor, ValidationError, ValidationResult, ViolationKind,
 };
-use crate::error::Result;
-use async_trait::async_trait;
 use sea_orm::DatabaseConnection;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -225,7 +225,7 @@ struct CondaEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migration::Migrator;
+    use rust_tessera::migration::Migrator;
     use sea_orm::Database;
     use sea_orm_migration::MigratorTrait;
 

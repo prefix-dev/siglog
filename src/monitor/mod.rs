@@ -4,15 +4,15 @@
 //! but also validates the log contents according to domain-specific rules.
 //!
 //! This module provides:
-//! - A `Monitor` trait for implementing custom validation logic
-//! - A `ContentIndex` for tracking seen entries and detecting duplicates
-//! - A `CondaMonitor` for validating Conda package logs
+//! - A [`Monitor`] trait for implementing custom validation logic
+//! - A [`ContentIndex`] for tracking seen entries and detecting duplicates
+//! - A [`MonitoringWitness`] that wraps a monitor to create a validating witness
+//!
+//! For Conda-specific monitoring, see the `conda-monitor` crate.
 
-mod conda;
 pub mod handlers;
 mod index;
 
-pub use conda::CondaMonitor;
 pub use index::{ContentIndex, ContentIndexStore, IndexViolation, ViolationKind};
 
 use crate::checkpoint::{CheckpointSignature, CheckpointSigner, CosignedCheckpoint};
