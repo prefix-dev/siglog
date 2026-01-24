@@ -55,13 +55,11 @@ fn compute_root(leaves: &[Sha256Hash]) -> Sha256Hash {
     }
 
     let mut root: Option<Sha256Hash> = None;
-    for h in &range {
-        if let Some(hash) = h {
-            root = Some(match root {
-                None => *hash,
-                Some(r) => hash_children(hash, &r),
-            });
-        }
+    for hash in range.iter().flatten() {
+        root = Some(match root {
+            None => *hash,
+            Some(r) => hash_children(hash, &r),
+        });
     }
     root.unwrap_or_else(empty_root_hash)
 }
@@ -101,8 +99,6 @@ async fn create_test_storage(leaves: &[Sha256Hash]) -> TileStorage {
 /// Test that proof_length matches what we generate.
 #[test]
 fn test_expected_proof_lengths() {
-    use crate::witness::ConsistencyProof;
-
     // Calculate expected proof length using the same algorithm as the verifier
     fn proof_length(old_size: u64, new_size: u64) -> usize {
         if old_size == 0 || old_size == new_size {

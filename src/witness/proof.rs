@@ -348,6 +348,7 @@ mod tests {
     use sigstore_merkle::hash_leaf;
 
     /// Build a complete tree and return the root hash.
+    #[allow(dead_code)]
     fn build_tree(leaves: &[Sha256Hash]) -> Sha256Hash {
         if leaves.is_empty() {
             return empty_root_hash();
@@ -383,13 +384,11 @@ mod tests {
 
         // Compute root from range
         let mut root: Option<Sha256Hash> = None;
-        for h in &range {
-            if let Some(hash) = h {
-                root = Some(match root {
-                    None => *hash,
-                    Some(r) => hash_children(hash, &r),
-                });
-            }
+        for hash in range.iter().flatten() {
+            root = Some(match root {
+                None => *hash,
+                Some(r) => hash_children(hash, &r),
+            });
         }
         root.unwrap_or_else(empty_root_hash)
     }

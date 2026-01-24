@@ -586,13 +586,11 @@ mod tests {
 
         // Chain range hashes to get root
         let mut root: Option<Sha256Hash> = None;
-        for level_hash in &range {
-            if let Some(h) = level_hash {
-                root = Some(match root {
-                    None => *h,
-                    Some(right) => hash_children(h, &right),
-                });
-            }
+        for h in range.iter().flatten() {
+            root = Some(match root {
+                None => *h,
+                Some(right) => hash_children(h, &right),
+            });
         }
 
         root.unwrap_or_else(empty_root_hash)

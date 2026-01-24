@@ -62,13 +62,11 @@ fn compute_root(leaves: &[Sha256Hash]) -> Sha256Hash {
     }
 
     let mut root: Option<Sha256Hash> = None;
-    for h in &range {
-        if let Some(hash) = h {
-            root = Some(match root {
-                None => *hash,
-                Some(r) => hash_children(hash, &r),
-            });
-        }
+    for hash in range.iter().flatten() {
+        root = Some(match root {
+            None => *hash,
+            Some(r) => hash_children(hash, &r),
+        });
     }
     root.unwrap_or_else(empty_root_hash)
 }
