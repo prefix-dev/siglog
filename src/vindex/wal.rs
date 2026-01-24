@@ -172,22 +172,22 @@ mod tests {
         {
             let mut reader = WalReader::open(path).unwrap();
 
-            let (idx, keys) = reader.next().unwrap().unwrap();
+            let (idx, keys) = reader.next_entry().unwrap().unwrap();
             assert_eq!(idx.value(), 0);
             assert_eq!(keys.len(), 1);
             assert_eq!(keys[0], [1u8; 32]);
 
-            let (idx, keys) = reader.next().unwrap().unwrap();
+            let (idx, keys) = reader.next_entry().unwrap().unwrap();
             assert_eq!(idx.value(), 1);
             assert_eq!(keys.len(), 2);
             assert_eq!(keys[0], [1u8; 32]);
             assert_eq!(keys[1], [2u8; 32]);
 
-            let (idx, keys) = reader.next().unwrap().unwrap();
+            let (idx, keys) = reader.next_entry().unwrap().unwrap();
             assert_eq!(idx.value(), 2);
             assert_eq!(keys.len(), 0);
 
-            assert!(reader.next().unwrap().is_none());
+            assert!(reader.next_entry().unwrap().is_none());
         }
     }
 

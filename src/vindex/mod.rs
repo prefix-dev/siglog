@@ -157,7 +157,7 @@ impl VerifiableIndex {
         // Replay existing WAL if it exists
         if wal_path.exists() {
             let mut reader = WalReader::open(wal_path)?;
-            while let Some((idx, keys)) = reader.next()? {
+            while let Some((idx, keys)) = reader.next_entry()? {
                 for key in keys {
                     index.entry(key).or_default().push(idx);
                 }
