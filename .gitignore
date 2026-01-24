@@ -1,0 +1,14 @@
+# Generated development files
+.env
+
+# Rust build artifacts
+target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# macOS
+.DS_Store

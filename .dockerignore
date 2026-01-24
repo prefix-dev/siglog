@@ -1,0 +1,32 @@
+# Build artifacts
+target/
+*.db
+*.db-wal
+*.db-shm
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Test files
+*.log
+test_*.sh
+run_*.sh
+
+# Documentation (not needed in image)
+*.md
+!DEPLOY.md
+
+# Local config
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
