@@ -119,8 +119,7 @@ fn main() -> anyhow::Result<()> {
         pb.set_message(filename.to_string());
 
         // Normalize entry using the library
-        let Some(normalized) =
-            RepodataEntry::from_repodata(filename, &args.subdir, entry, None)
+        let Some(normalized) = RepodataEntry::from_repodata(filename, &args.subdir, entry, None)
         else {
             skip_count += 1;
             pb.inc(1);

@@ -90,7 +90,7 @@ impl WalReader {
     /// Read the next entry from the WAL.
     ///
     /// Returns `Ok(None)` when EOF is reached.
-    pub fn next(&mut self) -> Result<Option<(LogIndex, Vec<IndexKey>)>> {
+    pub fn next_entry(&mut self) -> Result<Option<(LogIndex, Vec<IndexKey>)>> {
         self.line_buf.clear();
 
         let bytes_read = self

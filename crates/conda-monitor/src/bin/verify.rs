@@ -60,6 +60,7 @@ struct LookupResponse {
     root_hash: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ProofNode {
     label_bit_len: u32,
@@ -70,7 +71,7 @@ struct ProofNode {
 /// Compute RFC 6962 leaf hash
 fn compute_leaf_hash(entry_bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(&[0x00]); // Leaf prefix
+    hasher.update([0x00]); // Leaf prefix
     hasher.update(entry_bytes);
     hasher.finalize().into()
 }

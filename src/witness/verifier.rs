@@ -3,7 +3,7 @@
 use crate::checkpoint::{CosignedCheckpoint, KeyId};
 use crate::error::{Error, Result};
 use base64::Engine;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 /// Ed25519 algorithm identifier for note format.

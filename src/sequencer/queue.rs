@@ -5,8 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::storage::Database;
-use crate::types::{Entry, LogIndex, SequencedEntry};
-use std::sync::Arc;
+use crate::types::{Entry, LogIndex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
@@ -149,7 +148,7 @@ impl SequencerWorker {
         let result = self.db.sequence_entries(entries).await;
 
         // Drain the batch and send responses
-        let requests: Vec<SequenceRequest> = batch.drain(..).collect();
+        let requests: Vec<SequenceRequest> = std::mem::take(batch);
 
         match result {
             Ok(sequenced) => {

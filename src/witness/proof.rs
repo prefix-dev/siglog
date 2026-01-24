@@ -168,7 +168,7 @@ fn verify_power_of_2(
 ) -> Result<(), ProofError> {
     // For power-of-2 old_size, walk from old_root to new_root via siblings
     let mut sr = *old_root;
-    let old_level = old_size.trailing_zeros();
+    let _old_level = old_size.trailing_zeros();
 
     // Walk up the tree, combining with siblings
     let mut size = old_size;

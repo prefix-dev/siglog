@@ -107,6 +107,7 @@ impl Label {
     }
 
     /// Get the suffix starting at a given bit position.
+    #[allow(dead_code)]
     pub fn suffix(&self, start: u32) -> Self {
         if start >= self.bit_len {
             return Self::empty();
@@ -184,7 +185,7 @@ impl Label {
             if self.bytes[i] != other.bytes[i] {
                 // Found differing byte - find the exact bit
                 let diff = self.bytes[i] ^ other.bytes[i];
-                let leading_zeros = diff.leading_zeros() as u32;
+                let leading_zeros = diff.leading_zeros();
                 return (i as u32) * 8 + leading_zeros;
             }
         }
@@ -197,7 +198,7 @@ impl Label {
             let other_byte = other.bytes[full_bytes] & mask;
             if self_byte != other_byte {
                 let diff = self_byte ^ other_byte;
-                let leading_zeros = diff.leading_zeros() as u32;
+                let leading_zeros = diff.leading_zeros();
                 return (full_bytes as u32) * 8 + leading_zeros;
             }
         }
@@ -207,9 +208,10 @@ impl Label {
 }
 
 /// A node in the prefix tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum Node {
     /// An empty node (placeholder).
+    #[default]
     Empty,
     /// A leaf node with a key and value hash.
     Leaf { key: Label, value_hash: Hash256 },
@@ -302,7 +304,7 @@ impl PrefixTree {
                     let prefix = key.prefix(common_len);
 
                     let key_bit = key.bit(common_len);
-                    let existing_bit = existing_key.bit(common_len);
+                    let _existing_bit = existing_key.bit(common_len);
 
                     let new_leaf = Node::Leaf {
                         key: key.clone(),
@@ -478,12 +480,6 @@ impl PrefixTree {
             Node::Leaf { .. } => 1,
             Node::Internal { left, right, .. } => Self::count_keys(left) + Self::count_keys(right),
         }
-    }
-}
-
-impl Default for Node {
-    fn default() -> Self {
-        Node::Empty
     }
 }
 

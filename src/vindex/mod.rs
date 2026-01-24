@@ -159,7 +159,7 @@ impl VerifiableIndex {
             let mut reader = WalReader::open(wal_path)?;
             while let Some((idx, keys)) = reader.next()? {
                 for key in keys {
-                    index.entry(key).or_insert_with(Vec::new).push(idx);
+                    index.entry(key).or_default().push(idx);
                 }
                 tree_size = tree_size.max(idx.value() + 1);
             }
@@ -207,7 +207,7 @@ impl VerifiableIndex {
             let mut prefix_tree = self.prefix_tree.write().unwrap();
 
             for key in &keys {
-                let indices = index.entry(*key).or_insert_with(Vec::new);
+                let indices = index.entry(*key).or_default();
                 indices.push(idx);
 
                 // Update the prefix tree with the new value hash

@@ -158,7 +158,7 @@ pub async fn compute_subtree_hash(
         return read_leaf_hash(storage, start, tree_size).await;
     }
 
-    if count.is_power_of_two() && start % count == 0 {
+    if count.is_power_of_two() && start.is_multiple_of(count) {
         let level = count.trailing_zeros() as u8;
         let index = start >> level;
 

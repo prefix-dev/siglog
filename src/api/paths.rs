@@ -117,7 +117,7 @@ pub fn parse_tile_index(index_str: &str) -> Result<(u64, u8)> {
             .parse()
             .map_err(|_| Error::InvalidPath("invalid partial size".into()))?;
 
-        if partial < 1 || partial >= TILE_WIDTH {
+        if !(1..TILE_WIDTH).contains(&partial) {
             return Err(Error::InvalidPath("partial size must be 1-255".into()));
         }
 

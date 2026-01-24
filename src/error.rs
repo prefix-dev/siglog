@@ -16,7 +16,7 @@ pub enum Error {
     Database(#[from] sea_orm::DbErr),
 
     #[error("Storage error: {0}")]
-    Storage(#[from] opendal::Error),
+    Storage(Box<opendal::Error>),
 
     #[error("Invalid path: {0}")]
     InvalidPath(String),
@@ -67,5 +67,11 @@ impl IntoResponse for Error {
         };
 
         (status, message).into_response()
+    }
+}
+
+impl From<opendal::Error> for Error {
+    fn from(e: opendal::Error) -> Self {
+        Error::Storage(Box::new(e))
     }
 }

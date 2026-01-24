@@ -39,7 +39,7 @@ impl HashTile {
 
     /// Deserialize a tile from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        if data.len() % 32 != 0 {
+        if !data.len().is_multiple_of(32) {
             return Err(Error::InvalidEntry(format!(
                 "hash tile length {} is not a multiple of 32",
                 data.len()

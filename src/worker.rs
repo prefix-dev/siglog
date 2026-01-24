@@ -310,6 +310,7 @@ pub async fn run_checkpoint_worker(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_checkpoint(
     db: &Database,
     storage: &TileStorage,

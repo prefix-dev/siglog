@@ -37,9 +37,7 @@ impl TileStorage {
         // Disable virtual host style for compatibility with R2/MinIO
         builder = builder.disable_config_load();
 
-        let op = Operator::new(builder)
-            .map_err(|e| Error::Storage(e.into()))?
-            .finish();
+        let op = Operator::new(builder)?.finish();
 
         Ok(Self { op: Arc::new(op) })
     }
@@ -48,9 +46,7 @@ impl TileStorage {
     pub fn new_fs(root: &str) -> Result<Self> {
         let builder = Fs::default().root(root);
 
-        let op = Operator::new(builder)
-            .map_err(|e| Error::Storage(e.into()))?
-            .finish();
+        let op = Operator::new(builder)?.finish();
 
         Ok(Self { op: Arc::new(op) })
     }
@@ -69,7 +65,7 @@ impl TileStorage {
         match self.op.read(paths::CHECKPOINT_PATH).await {
             Ok(data) => Ok(Some(CheckpointData::new(data.to_vec()))),
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(Error::Storage(e)),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -78,7 +74,7 @@ impl TileStorage {
         self.op
             .write(paths::CHECKPOINT_PATH, data.as_bytes().to_vec())
             .await
-            .map_err(Error::Storage)
+            .map_err(Into::into)
     }
 
     // ========================================================================
@@ -101,7 +97,7 @@ impl TileStorage {
                 Ok(Some(tile))
             }
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(Error::Storage(e)),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -116,7 +112,7 @@ impl TileStorage {
         let path = paths::tile_path(level.value(), index.value(), partial.value());
         let data = tile.to_bytes();
 
-        self.op.write(&path, data).await.map_err(Error::Storage)
+        self.op.write(&path, data).await.map_err(Into::into)
     }
 
     // ========================================================================
@@ -138,7 +134,7 @@ impl TileStorage {
                 Ok(Some(bundle))
             }
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(Error::Storage(e)),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -152,7 +148,7 @@ impl TileStorage {
         let path = paths::entries_path(index.value(), partial.value());
         let data = bundle.to_bytes();
 
-        self.op.write(&path, data).await.map_err(Error::Storage)
+        self.op.write(&path, data).await.map_err(Into::into)
     }
 
     // ========================================================================
@@ -164,7 +160,7 @@ impl TileStorage {
         match self.op.read(path).await {
             Ok(data) => Ok(Some(data.to_vec())),
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(Error::Storage(e)),
+            Err(e) => Err(e.into()),
         }
     }
 }

@@ -174,10 +174,7 @@ impl<'a> TreeBuilder<'a> {
             index: tile_index,
         };
 
-        let mutator = self
-            .tile_cache
-            .entry(key)
-            .or_insert_with(|| TileMutator::new());
+        let mutator = self.tile_cache.entry(key).or_insert_with(TileMutator::new);
 
         mutator.set(node_level as usize, node_index as usize, hash);
 
@@ -239,13 +236,11 @@ impl<'a> TreeBuilder<'a> {
         // Chain the compact range hashes to get the root
         let mut hash: Option<Sha256Hash> = None;
 
-        for level_hash in &self.range {
-            if let Some(h) = level_hash {
-                hash = Some(match hash {
-                    None => *h,
-                    Some(right) => hash_children(h, &right),
-                });
-            }
+        for h in self.range.iter().flatten() {
+            hash = Some(match hash {
+                None => *h,
+                Some(right) => hash_children(h, &right),
+            });
         }
 
         hash.ok_or_else(|| Error::Internal("empty compact range".into()))

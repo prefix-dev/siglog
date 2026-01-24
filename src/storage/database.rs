@@ -61,7 +61,7 @@ impl Database {
     pub async fn run_migrations(&self) -> Result<()> {
         Migrator::up(&*self.conn, None)
             .await
-            .map_err(|e| Error::Database(e.into()))?;
+            .map_err(Error::Database)?;
         Ok(())
     }
 
