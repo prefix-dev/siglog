@@ -283,16 +283,43 @@ fly deploy
 
 ### Docker
 
-```dockerfile
-FROM rust:1.75-slim as builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release
+Pre-built images are available from GitHub Container Registry:
 
-FROM debian:bookworm-slim
-COPY --from=builder /app/target/release/rust-tessera /usr/local/bin/
-COPY --from=builder /app/target/release/witness /usr/local/bin/
-CMD ["rust-tessera"]
+```bash
+# Log server (replace OWNER/REPO with your GitHub repository)
+docker pull ghcr.io/OWNER/REPO-server:latest
+
+# Witness
+docker pull ghcr.io/OWNER/REPO-witness:latest
+```
+
+Run the log server:
+
+```bash
+docker run -d \
+  -p 8080:8080 \
+  -v tessera-data:/data \
+  -e LOG_ORIGIN="my-transparency-log" \
+  -e LOG_PRIVATE_KEY="PRIVATE+KEY+..." \
+  ghcr.io/OWNER/REPO-server:latest
+```
+
+Run the witness:
+
+```bash
+docker run -d \
+  -p 8081:8081 \
+  -v witness-data:/data \
+  -e WITNESS_PRIVATE_KEY="PRIVATE+KEY+..." \
+  -e WITNESS_LOGS="my-transparency-log=my-transparency-log+xxxx+..." \
+  ghcr.io/OWNER/REPO-witness:latest
+```
+
+To build images locally:
+
+```bash
+docker build -f docker/Dockerfile.server -t rust-tessera-server .
+docker build -f docker/Dockerfile.witness -t rust-tessera-witness .
 ```
 
 ### Kubernetes
