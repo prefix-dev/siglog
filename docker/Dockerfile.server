@@ -15,7 +15,7 @@ COPY src ./src
 COPY crates ./crates
 
 # Build release binary
-RUN cargo build --release --bin rust-tessera
+RUN cargo build --release --bin siglog
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binary from builder
-COPY --from=builder /app/target/release/rust-tessera /usr/local/bin/rust-tessera
+COPY --from=builder /app/target/release/siglog /usr/local/bin/siglog
 
 # Create data directory
 RUN mkdir -p /data
@@ -38,4 +38,4 @@ ENV STORAGE_PATH=/data/tiles
 
 EXPOSE 8080
 
-ENTRYPOINT ["rust-tessera"]
+ENTRYPOINT ["siglog"]

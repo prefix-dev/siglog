@@ -1,4 +1,4 @@
-//! Database migrations for rust-tessera.
+//! Database migrations for siglog.
 
 pub use sea_orm_migration::prelude::*;
 

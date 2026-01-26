@@ -12,8 +12,8 @@
 //! SHA256 associated with a filename) are stored verbatim for conflict reporting.
 
 use async_trait::async_trait;
-use rust_tessera::error::Result;
-use rust_tessera::monitor::{
+use siglog::error::Result;
+use siglog::monitor::{
     ContentIndex, ContentIndexStore, Monitor, ValidationError, ValidationResult, ViolationKind,
 };
 use sea_orm::DatabaseConnection;
@@ -225,7 +225,7 @@ struct CondaEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_tessera::migration::Migrator;
+    use siglog::migration::Migrator;
     use sea_orm::Database;
     use sea_orm_migration::MigratorTrait;
 

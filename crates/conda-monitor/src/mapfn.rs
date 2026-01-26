@@ -2,7 +2,7 @@
 //!
 //! Extracts the filename from each entry for indexing in the verifiable index.
 
-use rust_tessera::vindex::{IndexKey, MapFn};
+use siglog::vindex::{IndexKey, MapFn};
 use sha2::{Digest, Sha256};
 
 /// A MapFn that extracts the filename from conda repodata entries.

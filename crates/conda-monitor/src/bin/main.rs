@@ -8,8 +8,8 @@
 
 use clap::Parser;
 use conda_monitor::{CondaMonitor, LogConfig, MonitoringWitness};
-use rust_tessera::checkpoint::CheckpointSigner;
-use rust_tessera::monitor::handlers;
+use siglog::checkpoint::CheckpointSigner;
+use siglog::monitor::handlers;
 use sea_orm::{ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::sync::Arc;
@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("conda_monitor=info".parse()?)
-                .add_directive("rust_tessera=info".parse()?)
+                .add_directive("siglog=info".parse()?)
                 .add_directive("tower_http=debug".parse()?),
         )
         .init();
@@ -181,7 +181,7 @@ async fn connect_database(database_url: &str) -> anyhow::Result<DatabaseConnecti
     }
 
     // Run migrations
-    rust_tessera::migration::Migrator::up(&conn, None).await?;
+    siglog::migration::Migrator::up(&conn, None).await?;
 
     Ok(conn)
 }

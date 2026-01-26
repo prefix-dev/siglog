@@ -1,19 +1,19 @@
-//! Rust Tessera - A minimal Tessera-compatible transparency log server.
+//! Siglog - A minimal Tessera-compatible transparency log server.
 
 use clap::Parser;
-use rust_tessera::api::handlers::{self, AppState};
-use rust_tessera::checkpoint::CheckpointSigner;
-use rust_tessera::sequencer::{Sequencer, SequencerConfig};
-use rust_tessera::storage::{Database, TileStorage};
-use rust_tessera::vindex;
-use rust_tessera::worker::{self, WorkerConfig};
+use siglog::api::handlers::{self, AppState};
+use siglog::checkpoint::CheckpointSigner;
+use siglog::sequencer::{Sequencer, SequencerConfig};
+use siglog::storage::{Database, TileStorage};
+use siglog::vindex;
+use siglog::worker::{self, WorkerConfig};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
-/// Rust Tessera - A minimal Tessera-compatible transparency log server.
+/// Siglog - A minimal Tessera-compatible transparency log server.
 #[derive(Parser, Debug)]
-#[command(name = "rust-tessera")]
+#[command(name = "siglog")]
 #[command(about = "A minimal Tessera-compatible transparency log server")]
 struct Args {
     /// Database URL (PostgreSQL: postgres://... or SQLite: sqlite:./path.db)
@@ -104,14 +104,14 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("rust_tessera=info".parse()?)
+                .add_directive("siglog=info".parse()?)
                 .add_directive("tower_http=debug".parse()?),
         )
         .init();
 
     let args = Args::parse();
 
-    tracing::info!("Starting Rust Tessera");
+    tracing::info!("Starting Siglog");
     tracing::info!("Origin: {}", args.origin);
     tracing::info!("Listen: {}", args.listen);
 

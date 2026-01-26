@@ -26,7 +26,7 @@ jobs:
         include:
           - image: server
             dockerfile: docker/Dockerfile.server
-            binary: rust-tessera
+            binary: siglog
           - image: witness
             dockerfile: docker/Dockerfile.witness
             binary: witness

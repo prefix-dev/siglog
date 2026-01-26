@@ -1,4 +1,4 @@
-# rust-tessera
+# siglog
 
 A Rust implementation of a [Tessera](https://github.com/transparency-dev/tessera)-compatible transparency log server for package distribution systems.
 
@@ -57,7 +57,7 @@ This implementation follows the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) s
 cargo build --release
 
 # Binaries will be in ./target/release/
-# - rust-tessera     (log server)
+# - siglog           (log server)
 # - witness          (witness server)
 ```
 
@@ -65,12 +65,12 @@ cargo build --release
 
 ### Environment Variables
 
-#### Log Server (`rust-tessera`)
+#### Log Server (`siglog`)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `LISTEN_ADDR` | Server listen address | `0.0.0.0:8080` |
-| `DATABASE_URL` | Database connection string | `sqlite:./tessera.db` |
+| `DATABASE_URL` | Database connection string | `sqlite:./siglog.db` |
 | `LOG_ORIGIN` | Log origin identifier | `transparency-log` |
 | `LOG_PRIVATE_KEY` | Ed25519 signing key (note format) | Required |
 | `STORAGE_BACKEND` | Storage type: `s3` or `fs` | `fs` |
@@ -162,11 +162,11 @@ This starts:
 # Start the log server
 export LOG_ORIGIN="my-transparency-log"
 export LOG_PRIVATE_KEY="PRIVATE+KEY+my-transparency-log+xxxx+..."
-export DATABASE_URL="sqlite:./tessera.db"
+export DATABASE_URL="sqlite:./siglog.db"
 export STORAGE_BACKEND="fs"
 export STORAGE_PATH="./tiles"
 
-./target/release/rust-tessera
+./target/release/siglog
 
 # In another terminal, start the witness
 export WITNESS_PRIVATE_KEY="PRIVATE+KEY+witness.example.com+xxxx+..."
@@ -268,7 +268,7 @@ See [DEPLOY.md](DEPLOY.md) for detailed Fly.io deployment instructions using Lit
 Quick start:
 ```bash
 # Create app and storage
-fly apps create my-tessera-log
+fly apps create my-siglog
 fly storage create
 fly consul attach
 fly volumes create litefs --size 1
@@ -298,7 +298,7 @@ Run the log server:
 ```bash
 docker run -d \
   -p 8080:8080 \
-  -v tessera-data:/data \
+  -v siglog-data:/data \
   -e LOG_ORIGIN="my-transparency-log" \
   -e LOG_PRIVATE_KEY="PRIVATE+KEY+..." \
   ghcr.io/OWNER/REPO-server:latest
@@ -318,8 +318,8 @@ docker run -d \
 To build images locally:
 
 ```bash
-docker build -f docker/Dockerfile.server -t rust-tessera-server .
-docker build -f docker/Dockerfile.witness -t rust-tessera-witness .
+docker build -f docker/Dockerfile.server -t siglog-server .
+docker build -f docker/Dockerfile.witness -t siglog-witness .
 ```
 
 ### Kubernetes
@@ -343,7 +343,7 @@ spec:
     spec:
       containers:
       - name: log
-        image: your-registry/rust-tessera:latest
+        image: your-registry/siglog:latest
         ports:
         - containerPort: 8080
         env:
@@ -352,10 +352,10 @@ spec:
         - name: LOG_PRIVATE_KEY
           valueFrom:
             secretKeyRef:
-              name: tessera-secrets
+              name: siglog-secrets
               key: log-private-key
         - name: DATABASE_URL
-          value: "postgres://user:pass@postgres:5432/tessera"
+          value: "postgres://user:pass@postgres:5432/siglog"
         - name: STORAGE_BACKEND
           value: "s3"
         envFrom:

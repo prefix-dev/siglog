@@ -18,8 +18,8 @@ name = "conda-log-verify"
 path = "src/bin/verify.rs"
 
 [dependencies]
-# Core tessera library
-rust-tessera = { path = "../.." }
+# Core siglog library
+siglog = { path = "../.." }
 
 # Web framework
 axum = "0.8"

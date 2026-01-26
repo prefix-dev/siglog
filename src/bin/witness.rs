@@ -1,16 +1,16 @@
-//! Rust Tessera Witness - A witness server for transparency logs.
+//! Siglog Witness - A witness server for transparency logs.
 //!
 //! This binary implements the C2SP tlog-witness specification:
 //! <https://c2sp.org/tlog-witness>
 
 use clap::Parser;
-use rust_tessera::witness::{handlers, LogConfig, Witness};
+use siglog::witness::{handlers, LogConfig, Witness};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Rust Tessera Witness - A witness server for transparency logs.
+/// Siglog Witness - A witness server for transparency logs.
 #[derive(Parser, Debug)]
 #[command(name = "witness")]
 #[command(about = "A witness server for transparency logs")]
@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    tracing::info!("Starting Rust Tessera Witness");
+    tracing::info!("Starting Siglog Witness");
 
     // Validate we have at least one log to witness
     if args.logs.is_empty() {
@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize signer
     let signer = Arc::new(
-        rust_tessera::checkpoint::CheckpointSigner::from_note_key(&args.private_key)
+        siglog::checkpoint::CheckpointSigner::from_note_key(&args.private_key)
             .map_err(|e| anyhow::anyhow!("invalid private key: {}", e))?,
     );
     tracing::info!("Witness signer initialized: {}", signer.name());
@@ -146,7 +146,7 @@ async fn connect_database(database_url: &str) -> anyhow::Result<DatabaseConnecti
     }
 
     // Run migrations
-    rust_tessera::migration::Migrator::up(&conn, None).await?;
+    siglog::migration::Migrator::up(&conn, None).await?;
 
     Ok(conn)
 }

@@ -3,18 +3,23 @@ members = [".", "crates/conda-monitor"]
 resolver = "2"
 
 [package]
-name = "rust-tessera"
+name = "siglog"
 version = "0.1.0"
 edition = "2021"
 description = "A minimal Tessera-compatible transparency log server"
 license = "BSD-3-Clause"
+repository = "https://github.com/prefix-dev/siglog"
+homepage = "https://github.com/prefix-dev/siglog"
+readme = "README.md"
+keywords = ["transparency", "log", "merkle", "sigstore", "tessera"]
+categories = ["cryptography", "command-line-utilities"]
 
 [lib]
-name = "rust_tessera"
+name = "siglog"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rust-tessera"
+name = "siglog"
 path = "src/main.rs"
 
 [[bin]]

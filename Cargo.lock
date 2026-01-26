@@ -498,12 +498,12 @@ dependencies = [
  "hex",
  "indicatif",
  "reqwest",
- "rust-tessera",
  "sea-orm",
  "sea-orm-migration",
  "serde",
  "serde_json",
  "sha2",
+ "siglog",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2519,43 +2519,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust-tessera"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-recursion",
- "async-trait",
- "axum",
- "base64",
- "chrono",
- "clap",
- "ed25519-dalek",
- "futures",
- "hex",
- "indicatif",
- "opendal",
- "portpicker",
- "rand 0.8.5",
- "reqwest",
- "sea-orm",
- "sea-orm-migration",
- "serde",
- "serde_json",
- "sha2",
- "sigstore-crypto",
- "sigstore-merkle",
- "sigstore-types",
- "tempfile",
- "thiserror",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "wiremock",
-]
-
-[[package]]
 name = "rust_decimal"
 version = "1.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2962,6 +2925,43 @@ name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "siglog"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-recursion",
+ "async-trait",
+ "axum",
+ "base64",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "indicatif",
+ "opendal",
+ "portpicker",
+ "rand 0.8.5",
+ "reqwest",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sigstore-crypto",
+ "sigstore-merkle",
+ "sigstore-types",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
 
 [[package]]
 name = "signal-hook-registry"

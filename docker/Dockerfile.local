@@ -14,7 +14,7 @@ COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 
 # Build all release binaries
-RUN cargo build --release --bin rust-tessera --bin witness --bin conda-monitor
+RUN cargo build --release --bin siglog --bin witness --bin conda-monitor
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binaries from builder
-COPY --from=builder /app/target/release/rust-tessera /usr/local/bin/rust-tessera
+COPY --from=builder /app/target/release/siglog /usr/local/bin/siglog
 COPY --from=builder /app/target/release/witness /usr/local/bin/witness
 COPY --from=builder /app/target/release/conda-monitor /usr/local/bin/conda-monitor
 
@@ -37,4 +37,4 @@ RUN mkdir -p /data
 WORKDIR /data
 
 # Default to log service
-CMD ["rust-tessera"]
+CMD ["siglog"]

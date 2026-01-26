@@ -1,4 +1,4 @@
-# Local development setup for rust-tessera transparency log ecosystem
+# Local development setup for siglog transparency log ecosystem
 #
 # Setup:
 #   uv run scripts/setup_local.py   # Generates .env with keys
@@ -25,8 +25,8 @@ services:
       context: .
       dockerfile: Dockerfile.local
     command:
-      - rust-tessera
-      - --database-url=sqlite:/data/tessera.db?mode=rwc
+      - siglog
+      - --database-url=sqlite:/data/siglog.db?mode=rwc
       - --storage-backend=fs
       - --fs-root=/data/tiles
       - --origin=local.dev/log
@@ -39,7 +39,7 @@ services:
       - --vindex-key-field=name
       - --external-witnesses=witness=http://witness:8080,monitor=http://monitor:8080
     environment:
-      RUST_LOG: info,rust_tessera=debug
+      RUST_LOG: info,siglog=debug
     ports:
       - "8080:8080"
     volumes:
@@ -62,7 +62,7 @@ services:
       - --listen=0.0.0.0:8080
       - --log=local.dev/log=${LOG_PUBLIC_KEY}
     environment:
-      RUST_LOG: info,witness=debug,rust_tessera=debug
+      RUST_LOG: info,witness=debug,siglog=debug
     ports:
       - "8081:8080"
     volumes:
@@ -114,7 +114,7 @@ services:
       - --listen=0.0.0.0:8080
       - --log=local.dev/log=${LOG_PUBLIC_KEY}=http://log:8080
     environment:
-      RUST_LOG: info,conda_monitor=debug,rust_tessera=debug
+      RUST_LOG: info,conda_monitor=debug,siglog=debug
     ports:
       - "8082:8080"
     volumes:
