@@ -4,9 +4,9 @@
 //! <https://c2sp.org/tlog-witness>
 
 use clap::Parser;
-use siglog::witness::{handlers, LogConfig, Witness};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
+use siglog::witness::{handlers, LogConfig, Witness};
 use std::sync::Arc;
 use std::time::Duration;
 

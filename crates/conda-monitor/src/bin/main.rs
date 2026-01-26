@@ -8,10 +8,10 @@
 
 use clap::Parser;
 use conda_monitor::{CondaMonitor, LogConfig, MonitoringWitness};
-use siglog::checkpoint::CheckpointSigner;
-use siglog::monitor::handlers;
 use sea_orm::{ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
+use siglog::checkpoint::CheckpointSigner;
+use siglog::monitor::handlers;
 use std::sync::Arc;
 use std::time::Duration;
 

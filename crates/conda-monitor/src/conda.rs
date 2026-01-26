@@ -12,13 +12,13 @@
 //! SHA256 associated with a filename) are stored verbatim for conflict reporting.
 
 use async_trait::async_trait;
+use sea_orm::DatabaseConnection;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use siglog::error::Result;
 use siglog::monitor::{
     ContentIndex, ContentIndexStore, Monitor, ValidationError, ValidationResult, ViolationKind,
 };
-use sea_orm::DatabaseConnection;
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 /// Hash a key using SHA256 and return as hex string.
@@ -225,9 +225,9 @@ struct CondaEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use siglog::migration::Migrator;
     use sea_orm::Database;
     use sea_orm_migration::MigratorTrait;
+    use siglog::migration::Migrator;
 
     fn make_conda_entry(filename: &str, sha256: &str) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
