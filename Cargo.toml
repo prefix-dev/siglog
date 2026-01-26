@@ -71,8 +71,8 @@ async-recursion = "1"
 futures = "0.3"
 
 # HTTP client for CLI tools
-reqwest = { version = "0.12", features = ["json", "blocking"] }
-indicatif = "0.17"
+reqwest = { version = "0.13", features = ["json", "blocking"] }
+indicatif = "0.18.3"
 
 [dev-dependencies]
 tempfile = "3"
