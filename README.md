@@ -1,3 +1,5 @@
+![Siglog Banner](https://github.com/user-attachments/assets/dea9a3a6-94fd-45ee-a123-ccc126e88163)
+
 # siglog
 
 A Rust implementation of a [Tessera](https://github.com/transparency-dev/tessera)-compatible transparency log server for package distribution systems.
