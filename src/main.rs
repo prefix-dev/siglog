@@ -233,8 +233,16 @@ async fn main() -> anyhow::Result<()> {
         let map_fn = Arc::new(vindex::JsonKeysMapFn::new(&args.vindex_key_field));
 
         let vi = if let Some(wal_path) = &args.vindex_wal_path {
-            tracing::info!("Vindex WAL path: {}", wal_path);
-            vindex::VerifiableIndex::with_wal(map_fn, wal_path)?
+            // Get the integrated_size from the database for WAL validation
+            // This ensures we truncate the WAL to match the database state after a crash
+            let log_state = db.get_log_state().await?;
+            let expected_tree_size = log_state.integrated_size.value();
+            tracing::info!(
+                "Vindex WAL path: {}, expected tree size from DB: {}",
+                wal_path,
+                expected_tree_size
+            );
+            vindex::VerifiableIndex::with_wal(map_fn, wal_path, expected_tree_size)?
         } else {
             vindex::VerifiableIndex::new(map_fn)
         };

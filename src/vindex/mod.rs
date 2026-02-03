@@ -21,11 +21,11 @@ use crate::error::Result;
 use crate::types::LogIndex;
 pub use prefix_tree::{LookupProof, PrefixTree, ProofNode};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-pub use wal::{WalReader, WalWriter};
+pub use wal::{validate_and_truncate_wal, WalReader, WalWriter};
 
 /// A 32-byte SHA256 hash used as a key in the index.
 pub type IndexKey = [u8; 32];
@@ -145,21 +145,49 @@ impl VerifiableIndex {
 
     /// Create a new verifiable index with WAL persistence.
     ///
-    /// If the WAL file exists, it will be replayed to rebuild the index.
-    pub fn with_wal(map_fn: Arc<dyn MapFn>, wal_path: impl AsRef<Path>) -> Result<Self> {
+    /// If the WAL file exists, it will be validated against the expected tree size
+    /// and truncated if necessary (to handle crash recovery), then replayed to
+    /// rebuild the index.
+    ///
+    /// # Arguments
+    /// * `map_fn` - The function to extract keys from entry data
+    /// * `wal_path` - Path to the WAL file
+    /// * `expected_tree_size` - The integrated tree size from the database; used to
+    ///   truncate the WAL if it ran ahead before a crash
+    pub fn with_wal(
+        map_fn: Arc<dyn MapFn>,
+        wal_path: impl AsRef<Path>,
+        expected_tree_size: u64,
+    ) -> Result<Self> {
         let wal_path = wal_path.as_ref();
+
+        // Validate and truncate WAL to match expected tree size
+        // This is critical for crash recovery: if the WAL was flushed but the database
+        // wasn't updated before a crash, we truncate the WAL to avoid duplicates
+        let actual_wal_size = validate_and_truncate_wal(wal_path, expected_tree_size)?;
+        tracing::info!(
+            "WAL validated: expected_tree_size={}, actual_wal_size={}",
+            expected_tree_size,
+            actual_wal_size
+        );
 
         // Create or open WAL
         let mut tree_size = 0u64;
         let mut index: HashMap<IndexKey, Vec<LogIndex>> = HashMap::new();
         let mut prefix_tree = PrefixTree::new();
 
+        // Track seen (idx, key) pairs to prevent duplicates (defense in depth)
+        let mut seen: HashSet<(u64, IndexKey)> = HashSet::new();
+
         // Replay existing WAL if it exists
         if wal_path.exists() {
             let mut reader = WalReader::open(wal_path)?;
             while let Some((idx, keys)) = reader.next_entry()? {
                 for key in keys {
-                    index.entry(key).or_default().push(idx);
+                    // Deduplicate: only add if we haven't seen this (idx, key) pair
+                    if seen.insert((idx.value(), key)) {
+                        index.entry(key).or_default().push(idx);
+                    }
                 }
                 tree_size = tree_size.max(idx.value() + 1);
             }
@@ -169,6 +197,12 @@ impl VerifiableIndex {
                 let value_hash = compute_value_hash(indices);
                 prefix_tree.insert(key, value_hash);
             }
+
+            tracing::info!(
+                "WAL replayed: {} unique keys, tree_size={}",
+                index.len(),
+                tree_size
+            );
         }
 
         let wal_writer = WalWriter::open(wal_path)?;
