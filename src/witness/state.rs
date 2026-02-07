@@ -106,7 +106,14 @@ impl WitnessStateStore {
             .await?;
 
         match current {
-            Some(_) => {
+            Some(model) => {
+                // Prevent size rollback: new size must be >= current size
+                if (size as i64) < model.size {
+                    return Err(Error::InvalidEntry(format!(
+                        "size rollback not allowed: current size {} > new size {}",
+                        model.size, size
+                    )));
+                }
                 // Update existing
                 witness_state::Entity::update(witness_state::ActiveModel {
                     origin: ActiveValue::Unchanged(origin.to_string()),

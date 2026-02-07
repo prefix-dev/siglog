@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use siglog::api::handlers::{self, AppState};
+use siglog::api::rate_limit;
 use siglog::checkpoint::CheckpointSigner;
 use siglog::sequencer::{Sequencer, SequencerConfig};
 use siglog::storage::{Database, TileStorage};
@@ -10,6 +11,7 @@ use siglog::worker::{self, WorkerConfig};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 
 /// Siglog - A minimal Tessera-compatible transparency log server.
 #[derive(Parser, Debug)]
@@ -283,6 +285,21 @@ async fn main() -> anyhow::Result<()> {
     }
     let state = Arc::new(state);
 
+    // Configure rate limiting
+    let rate_limit_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(rate_limit::RATE_LIMIT_PER_SECOND)
+            .burst_size(rate_limit::RATE_LIMIT_BURST_SIZE)
+            .finish()
+            .expect("failed to create rate limit config"),
+    );
+    let governor_layer = GovernorLayer::new(rate_limit_config);
+    tracing::info!(
+        "Rate limiting enabled: {} req/s per IP, burst {}",
+        rate_limit::RATE_LIMIT_PER_SECOND,
+        rate_limit::RATE_LIMIT_BURST_SIZE
+    );
+
     // Build router
     let mut app = axum::Router::new()
         .route("/add", axum::routing::post(handlers::add_entry))
@@ -312,7 +329,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Vindex API enabled at /vindex/lookup/*");
     }
 
-    let app = app.with_state(state).layer(
+    let app = app.with_state(state).layer(governor_layer).layer(
         tower_http::trace::TraceLayer::new_for_http()
             .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO))
             .on_response(tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO)),

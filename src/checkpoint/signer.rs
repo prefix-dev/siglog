@@ -266,8 +266,21 @@ impl Checkpoint {
 pub struct Origin(String);
 
 impl Origin {
-    pub fn new(origin: String) -> Self {
-        Self(origin)
+    /// Create a new origin string with validation.
+    ///
+    /// Returns an error if the origin:
+    /// - Is empty
+    /// - Contains newline or carriage return characters (breaks checkpoint format)
+    pub fn new(origin: String) -> Result<Self> {
+        if origin.is_empty() {
+            return Err(Error::Config("origin cannot be empty".into()));
+        }
+        if origin.contains('\n') || origin.contains('\r') {
+            return Err(Error::Config(
+                "origin cannot contain newline or carriage return characters".into(),
+            ));
+        }
+        Ok(Self(origin))
     }
 
     pub fn as_str(&self) -> &str {
@@ -275,14 +288,18 @@ impl Origin {
     }
 }
 
-impl From<String> for Origin {
-    fn from(s: String) -> Self {
+impl TryFrom<String> for Origin {
+    type Error = Error;
+
+    fn try_from(s: String) -> Result<Self> {
         Self::new(s)
     }
 }
 
-impl From<&str> for Origin {
-    fn from(s: &str) -> Self {
+impl TryFrom<&str> for Origin {
+    type Error = Error;
+
+    fn try_from(s: &str) -> Result<Self> {
         Self::new(s.to_string())
     }
 }
@@ -452,7 +469,7 @@ impl CosignedCheckpoint {
             ));
         }
 
-        let origin = Origin::new(body_lines[0].to_string());
+        let origin = Origin::new(body_lines[0].to_string())?;
         let size = body_lines[1]
             .parse::<u64>()
             .map_err(|e| Error::Config(format!("invalid tree size: {}", e)))?;
@@ -554,7 +571,7 @@ mod tests {
         let signer = CheckpointSigner::generate("test.example.com");
 
         let checkpoint = Checkpoint::new(
-            Origin::new("test.example.com".into()),
+            Origin::new("test.example.com".to_string()).unwrap(),
             TreeSize::new(42),
             Sha256Hash::from_bytes([0u8; 32]),
         );
@@ -587,7 +604,7 @@ mod tests {
     fn test_checkpoint_body_format() {
         let hash = Sha256Hash::from_bytes([0u8; 32]);
         let checkpoint = Checkpoint::new(
-            Origin::new("example.com/log".into()),
+            Origin::new("example.com/log".to_string()).unwrap(),
             TreeSize::new(100),
             hash,
         );
@@ -609,7 +626,7 @@ mod tests {
         let witness2 = CheckpointSigner::generate("witness2.example.com");
 
         let checkpoint = Checkpoint::new(
-            Origin::new("log.example.com".into()),
+            Origin::new("log.example.com".to_string()).unwrap(),
             TreeSize::new(42),
             Sha256Hash::from_bytes([0u8; 32]),
         );
@@ -634,5 +651,21 @@ mod tests {
         // Merging again should not duplicate
         cosigned1.merge_signatures(&cosigned2);
         assert_eq!(cosigned1.signature_count(), 3);
+    }
+
+    #[test]
+    fn test_origin_validation() {
+        // Valid origins
+        assert!(Origin::new("example.com/log".to_string()).is_ok());
+        assert!(Origin::new("my-log".to_string()).is_ok());
+        assert!(Origin::new("a".to_string()).is_ok());
+
+        // Invalid: empty
+        assert!(Origin::new("".to_string()).is_err());
+
+        // Invalid: contains newline
+        assert!(Origin::new("log\nwith\nnewlines".to_string()).is_err());
+        assert!(Origin::new("log\rwith\rcarriage".to_string()).is_err());
+        assert!(Origin::new("log\r\nmixed".to_string()).is_err());
     }
 }

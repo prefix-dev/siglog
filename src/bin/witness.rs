@@ -3,12 +3,17 @@
 //! This binary implements the C2SP tlog-witness specification:
 //! <https://c2sp.org/tlog-witness>
 
+use axum::extract::DefaultBodyLimit;
 use clap::Parser;
 use sea_orm::{ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use siglog::witness::{handlers, LogConfig, Witness};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Maximum allowed size for witness request bodies (1MB).
+/// This prevents DoS attacks from extremely large checkpoint submissions.
+const MAX_BODY_SIZE: usize = 1024 * 1024;
 
 /// Siglog Witness - A witness server for transparency logs.
 #[derive(Parser, Debug)]
@@ -87,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     let witness = Arc::new(Witness::new(signer, conn, args.logs));
     tracing::info!("Witness name: {}", witness.name());
 
-    // Build router
+    // Build router with body size limit
     let app = axum::Router::new()
         .route(
             "/add-checkpoint",
@@ -95,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/health", axum::routing::get(handlers::health))
         .with_state(witness)
+        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
                 .make_span_with(
@@ -104,6 +110,12 @@ async fn main() -> anyhow::Result<()> {
                     tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO),
                 ),
         );
+
+    tracing::info!(
+        "Request body size limit: {} bytes ({} MB)",
+        MAX_BODY_SIZE,
+        MAX_BODY_SIZE / 1024 / 1024
+    );
 
     // Start server
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;

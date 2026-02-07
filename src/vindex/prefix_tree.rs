@@ -12,6 +12,7 @@
 //! - Root: Get the root hash committing to the entire tree state
 
 use sha2::{Digest, Sha256};
+use smallvec::SmallVec;
 
 /// A 256-bit key or hash.
 pub type Hash256 = [u8; 32];
@@ -40,7 +41,7 @@ pub struct LookupProof {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Label {
     /// The bytes containing the bits.
-    bytes: Vec<u8>,
+    bytes: SmallVec<[u8; 32]>,
     /// Number of valid bits (0 to bytes.len() * 8).
     bit_len: u32,
 }
@@ -49,7 +50,7 @@ impl Label {
     /// Create an empty label.
     pub fn empty() -> Self {
         Self {
-            bytes: Vec::new(),
+            bytes: SmallVec::new(),
             bit_len: 0,
         }
     }
@@ -57,7 +58,7 @@ impl Label {
     /// Create a label from a full 256-bit key.
     pub fn from_key(key: &Hash256) -> Self {
         Self {
-            bytes: key.to_vec(),
+            bytes: SmallVec::from_slice(key),
             bit_len: 256,
         }
     }
@@ -93,7 +94,7 @@ impl Label {
         let full_bytes = (len / 8) as usize;
         let remaining_bits = len % 8;
 
-        let mut bytes = self.bytes[..full_bytes].to_vec();
+        let mut bytes = SmallVec::from_slice(&self.bytes[..full_bytes]);
         if remaining_bits > 0 && full_bytes < self.bytes.len() {
             // Mask off the unused bits in the last byte
             let mask = 0xFFu8 << (8 - remaining_bits);

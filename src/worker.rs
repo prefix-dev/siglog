@@ -288,7 +288,7 @@ pub async fn run_checkpoint_worker(
         external_witnesses.len()
     );
 
-    let origin = Origin::new(config.origin.clone());
+    let origin = Origin::new(config.origin.clone()).expect("invalid log origin");
     let client = reqwest::Client::new();
     let mut witness_state = ExternalWitnessState::default();
     let mut last_published = LastPublished::default();
@@ -564,7 +564,7 @@ mod tests {
 
         // Create a checkpoint
         let checkpoint = Checkpoint::new(
-            Origin::new("test.log".to_string()),
+            Origin::new("test.log".to_string()).unwrap(),
             TreeSize::new(10),
             empty_root_hash(),
         );
@@ -603,7 +603,7 @@ mod tests {
 
         // Create a checkpoint
         let checkpoint = Checkpoint::new(
-            Origin::new("test.log".to_string()),
+            Origin::new("test.log".to_string()).unwrap(),
             TreeSize::new(10),
             empty_root_hash(),
         );
@@ -647,7 +647,7 @@ mod tests {
 
         // Create a checkpoint
         let checkpoint = Checkpoint::new(
-            Origin::new("test.log".to_string()),
+            Origin::new("test.log".to_string()).unwrap(),
             TreeSize::new(10),
             empty_root_hash(),
         );
@@ -730,7 +730,7 @@ mod tests {
 
         // Create a checkpoint
         let checkpoint = Checkpoint::new(
-            Origin::new("test.log".to_string()),
+            Origin::new("test.log".to_string()).unwrap(),
             TreeSize::new(10),
             empty_root_hash(),
         );

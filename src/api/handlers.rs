@@ -16,6 +16,11 @@ use axum::{
 use serde::Serialize;
 use std::sync::Arc;
 
+/// Maximum entry size in bytes (10 MB).
+/// This prevents DoS attacks via extremely large entries that could exhaust
+/// memory, disk space, or database storage.
+const MAX_ENTRY_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -47,6 +52,15 @@ impl AppState {
 pub async fn add_entry(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Response> {
     if body.is_empty() {
         return Err(Error::InvalidEntry("empty entry".into()));
+    }
+
+    // Validate entry size to prevent DoS attacks
+    if body.len() > MAX_ENTRY_SIZE {
+        return Err(Error::InvalidEntry(format!(
+            "entry too large: {} bytes (max {} bytes)",
+            body.len(),
+            MAX_ENTRY_SIZE
+        )));
     }
 
     // Create entry and add to sequencer

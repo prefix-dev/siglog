@@ -2,3 +2,4 @@
 
 pub mod handlers;
 pub mod paths;
+pub mod rate_limit;

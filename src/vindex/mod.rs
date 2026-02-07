@@ -17,7 +17,7 @@
 mod prefix_tree;
 mod wal;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::types::LogIndex;
 pub use prefix_tree::{LookupProof, PrefixTree, ProofNode};
 use sha2::{Digest, Sha256};
@@ -25,7 +25,10 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-pub use wal::{validate_and_truncate_wal, WalReader, WalWriter};
+pub use wal::{
+    validate_and_truncate_wal, BatchedBinaryWalWriter, BatchedWalWriter, BinaryWalWriter,
+    WalReader, WalWriter,
+};
 
 /// A 32-byte SHA256 hash used as a key in the index.
 pub type IndexKey = [u8; 32];
@@ -117,29 +120,97 @@ pub struct LookupResult {
     pub proof: Vec<ProofNode>,
 }
 
+/// WAL writer variant (batched or unbatched).
+enum WalWriterVariant {
+    Unbatched(WalWriter),
+    Batched(BatchedWalWriter),
+}
+
+impl WalWriterVariant {
+    fn append(&mut self, idx: LogIndex, keys: &[IndexKey]) -> Result<()> {
+        match self {
+            WalWriterVariant::Unbatched(w) => w.append(idx, keys),
+            WalWriterVariant::Batched(w) => w.append(idx, keys.to_vec()),
+        }
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        match self {
+            WalWriterVariant::Unbatched(w) => w.flush(),
+            WalWriterVariant::Batched(w) => w.flush(),
+        }
+    }
+}
+
 /// The verifiable index maintains a mapping from keys to log indices.
 pub struct VerifiableIndex {
     /// The key → indices mapping.
     index: RwLock<HashMap<IndexKey, Vec<LogIndex>>>,
     /// WAL writer for persistence.
-    wal_writer: Option<RwLock<WalWriter>>,
+    wal_writer: Option<RwLock<WalWriterVariant>>,
     /// The map function for extracting keys.
     map_fn: Arc<dyn MapFn>,
     /// Current tree size (number of entries indexed).
     tree_size: RwLock<u64>,
     /// The Merkle prefix tree for verifiable proofs.
     prefix_tree: RwLock<PrefixTree>,
+    /// Maximum number of unique keys allowed.
+    max_keys: usize,
+    /// Maximum number of indices per key.
+    max_indices_per_key: usize,
 }
 
 impl VerifiableIndex {
+    /// Default maximum number of unique keys (10M keys ≈ 2.5 GB).
+    const DEFAULT_MAX_KEYS: usize = 10_000_000;
+
+    /// Default maximum number of indices per key (1000 indices per key).
+    const DEFAULT_MAX_INDICES_PER_KEY: usize = 1000;
+
+    /// Read max_keys from environment or use default.
+    fn get_max_keys() -> usize {
+        std::env::var("VINDEX_MAX_KEYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(Self::DEFAULT_MAX_KEYS)
+    }
+
+    /// Read max_indices_per_key from environment or use default.
+    fn get_max_indices_per_key() -> usize {
+        std::env::var("VINDEX_MAX_INDICES_PER_KEY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(Self::DEFAULT_MAX_INDICES_PER_KEY)
+    }
+
     /// Create a new in-memory verifiable index without persistence.
     pub fn new(map_fn: Arc<dyn MapFn>) -> Self {
+        Self::new_with_limits(map_fn, None, None)
+    }
+
+    /// Create a new in-memory verifiable index with custom limits.
+    pub fn new_with_limits(
+        map_fn: Arc<dyn MapFn>,
+        max_keys: Option<usize>,
+        max_indices_per_key: Option<usize>,
+    ) -> Self {
+        let max_keys = max_keys.unwrap_or_else(Self::get_max_keys);
+        let max_indices_per_key = max_indices_per_key.unwrap_or_else(Self::get_max_indices_per_key);
+
+        tracing::info!(
+            "VerifiableIndex limits: max_keys={}, max_indices_per_key={}",
+            max_keys,
+            max_indices_per_key
+        );
+
         Self {
             index: RwLock::new(HashMap::new()),
             wal_writer: None,
             map_fn,
             tree_size: RwLock::new(0),
             prefix_tree: RwLock::new(PrefixTree::new()),
+            max_keys,
+            max_indices_per_key,
         }
     }
 
@@ -158,6 +229,25 @@ impl VerifiableIndex {
         map_fn: Arc<dyn MapFn>,
         wal_path: impl AsRef<Path>,
         expected_tree_size: u64,
+    ) -> Result<Self> {
+        Self::with_wal_and_batch_size(map_fn, wal_path, expected_tree_size, 1)
+    }
+
+    /// Create a new verifiable index with batched WAL persistence.
+    ///
+    /// This variant uses batched writes to reduce fsync overhead.
+    /// For high throughput workloads, use batch_size=100 or higher.
+    ///
+    /// # Arguments
+    /// * `map_fn` - The function to extract keys from entry data
+    /// * `wal_path` - Path to the WAL file
+    /// * `expected_tree_size` - The integrated tree size from the database
+    /// * `batch_size` - Number of entries to buffer before fsyncing (1 = no batching)
+    pub fn with_wal_and_batch_size(
+        map_fn: Arc<dyn MapFn>,
+        wal_path: impl AsRef<Path>,
+        expected_tree_size: u64,
+        batch_size: usize,
     ) -> Result<Self> {
         let wal_path = wal_path.as_ref();
 
@@ -205,7 +295,22 @@ impl VerifiableIndex {
             );
         }
 
-        let wal_writer = WalWriter::open(wal_path)?;
+        // Create writer (batched or unbatched based on batch_size)
+        let wal_writer = if batch_size > 1 {
+            tracing::info!("Using batched WAL writer with batch_size={}", batch_size);
+            WalWriterVariant::Batched(BatchedWalWriter::open(wal_path, batch_size)?)
+        } else {
+            WalWriterVariant::Unbatched(WalWriter::open(wal_path)?)
+        };
+
+        let max_keys = Self::get_max_keys();
+        let max_indices_per_key = Self::get_max_indices_per_key();
+
+        tracing::info!(
+            "VerifiableIndex limits: max_keys={}, max_indices_per_key={}",
+            max_keys,
+            max_indices_per_key
+        );
 
         Ok(Self {
             index: RwLock::new(index),
@@ -213,6 +318,8 @@ impl VerifiableIndex {
             map_fn,
             tree_size: RwLock::new(tree_size),
             prefix_tree: RwLock::new(prefix_tree),
+            max_keys,
+            max_indices_per_key,
         })
     }
 
@@ -227,6 +334,51 @@ impl VerifiableIndex {
             let mut tree_size = self.tree_size.write().unwrap();
             *tree_size = (*tree_size).max(idx.value() + 1);
             return Ok(());
+        }
+
+        // Check memory limits before modifying state
+        {
+            let index = self.index.read().unwrap();
+            let current_key_count = index.len();
+
+            // Count how many new keys would be added
+            let new_keys_count = keys.iter().filter(|k| !index.contains_key(*k)).count();
+
+            // Check total key limit
+            if current_key_count + new_keys_count > self.max_keys {
+                let msg = format!(
+                    "maximum keys exceeded: current={}, new={}, max={}",
+                    current_key_count, new_keys_count, self.max_keys
+                );
+                tracing::warn!("Index capacity limit: {}", msg);
+                return Err(Error::IndexFull(msg));
+            }
+
+            // Check per-key limit
+            for key in &keys {
+                if let Some(indices) = index.get(key) {
+                    if indices.len() >= self.max_indices_per_key {
+                        let msg = format!(
+                            "maximum indices per key exceeded: key has {} indices, max={}",
+                            indices.len(),
+                            self.max_indices_per_key
+                        );
+                        tracing::warn!("Index capacity limit: {}", msg);
+                        return Err(Error::IndexFull(msg));
+                    }
+                }
+            }
+
+            // Log warning when approaching limits (at 90%)
+            let key_usage_pct = (current_key_count as f64 / self.max_keys as f64) * 100.0;
+            if key_usage_pct >= 90.0 {
+                tracing::warn!(
+                    "Index approaching capacity: {:.1}% of max keys ({}/{})",
+                    key_usage_pct,
+                    current_key_count,
+                    self.max_keys
+                );
+            }
         }
 
         // Write to WAL first (if enabled)
@@ -309,6 +461,50 @@ impl VerifiableIndex {
     pub fn root_hash(&self) -> IndexKey {
         self.prefix_tree.read().unwrap().root_hash()
     }
+
+    /// Get the maximum number of keys allowed.
+    pub fn max_keys(&self) -> usize {
+        self.max_keys
+    }
+
+    /// Get the maximum number of indices per key allowed.
+    pub fn max_indices_per_key(&self) -> usize {
+        self.max_indices_per_key
+    }
+
+    /// Get memory usage statistics.
+    pub fn memory_stats(&self) -> MemoryStats {
+        let index = self.index.read().unwrap();
+        let key_count = index.len();
+        let total_indices: usize = index.values().map(|v| v.len()).sum();
+        let max_indices_for_key = index.values().map(|v| v.len()).max().unwrap_or(0);
+
+        MemoryStats {
+            key_count,
+            max_keys: self.max_keys,
+            total_indices,
+            max_indices_for_key,
+            max_indices_per_key: self.max_indices_per_key,
+            key_usage_pct: (key_count as f64 / self.max_keys as f64) * 100.0,
+        }
+    }
+}
+
+/// Memory usage statistics for the verifiable index.
+#[derive(Debug, Clone)]
+pub struct MemoryStats {
+    /// Current number of unique keys.
+    pub key_count: usize,
+    /// Maximum number of keys allowed.
+    pub max_keys: usize,
+    /// Total number of indices across all keys.
+    pub total_indices: usize,
+    /// Maximum number of indices for any single key.
+    pub max_indices_for_key: usize,
+    /// Maximum number of indices per key allowed.
+    pub max_indices_per_key: usize,
+    /// Key usage as a percentage.
+    pub key_usage_pct: f64,
 }
 
 /// Compute the value hash for a list of indices.
@@ -459,5 +655,88 @@ mod tests {
         assert_eq!(key1, key2);
         assert_ne!(key1, key3);
         assert_eq!(key1.len(), 32);
+    }
+
+    #[test]
+    fn test_memory_stats() {
+        // Ensure defaults are used
+        std::env::remove_var("VINDEX_MAX_KEYS");
+        std::env::remove_var("VINDEX_MAX_INDICES_PER_KEY");
+
+        let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+        let index = VerifiableIndex::new(map_fn);
+
+        // Initial stats
+        let stats = index.memory_stats();
+        assert_eq!(stats.key_count, 0);
+        assert_eq!(stats.total_indices, 0);
+        assert_eq!(stats.max_indices_for_key, 0);
+
+        // Add some entries
+        index
+            .index_entry(LogIndex::new(0), br#"{"name": "foo"}"#)
+            .unwrap();
+        index
+            .index_entry(LogIndex::new(1), br#"{"name": "bar"}"#)
+            .unwrap();
+        index
+            .index_entry(LogIndex::new(2), br#"{"name": "foo"}"#)
+            .unwrap();
+
+        let stats = index.memory_stats();
+        assert_eq!(stats.key_count, 2); // foo, bar
+        assert_eq!(stats.total_indices, 3); // 2 for foo, 1 for bar
+        assert_eq!(stats.max_indices_for_key, 2); // foo has 2 indices
+        assert!(stats.key_usage_pct < 1.0); // Very low usage
+    }
+
+    #[test]
+    fn test_max_keys_limit() {
+        let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+        let index = VerifiableIndex::new_with_limits(map_fn, Some(2), Some(1000));
+
+        assert_eq!(index.max_keys(), 2);
+
+        // Add two keys - should succeed
+        index
+            .index_entry(LogIndex::new(0), br#"{"name": "foo"}"#)
+            .unwrap();
+        index
+            .index_entry(LogIndex::new(1), br#"{"name": "bar"}"#)
+            .unwrap();
+
+        // Try to add a third key - should fail
+        let result = index.index_entry(LogIndex::new(2), br#"{"name": "baz"}"#);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::IndexFull(_)));
+
+        // Adding duplicate key should still work
+        let result = index.index_entry(LogIndex::new(3), br#"{"name": "foo"}"#);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_max_indices_per_key_limit() {
+        let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+        let index = VerifiableIndex::new_with_limits(map_fn, Some(1000), Some(2));
+
+        assert_eq!(index.max_indices_per_key(), 2);
+
+        // Add two indices for same key - should succeed
+        index
+            .index_entry(LogIndex::new(0), br#"{"name": "foo"}"#)
+            .unwrap();
+        index
+            .index_entry(LogIndex::new(1), br#"{"name": "foo"}"#)
+            .unwrap();
+
+        // Try to add a third index for same key - should fail
+        let result = index.index_entry(LogIndex::new(2), br#"{"name": "foo"}"#);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::IndexFull(_)));
+
+        // Adding a different key should still work
+        let result = index.index_entry(LogIndex::new(3), br#"{"name": "bar"}"#);
+        assert!(result.is_ok());
     }
 }

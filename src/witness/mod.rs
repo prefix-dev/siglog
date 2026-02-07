@@ -211,9 +211,20 @@ impl AddCheckpointRequest {
 
         // Parse proof hashes until empty line
         let mut proof_hashes = Vec::new();
+        // Maximum proof hashes: 64 (covers tree height up to 2^64)
+        const MAX_PROOF_HASHES: usize = 64;
+
         for line in lines.by_ref() {
             if line.is_empty() {
                 break;
+            }
+
+            // Check limit before adding
+            if proof_hashes.len() >= MAX_PROOF_HASHES {
+                return Err(Error::InvalidEntry(format!(
+                    "too many proof hashes: limit is {}",
+                    MAX_PROOF_HASHES
+                )));
             }
             let hash_bytes = base64::engine::general_purpose::STANDARD
                 .decode(line)

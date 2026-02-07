@@ -44,6 +44,9 @@ pub enum Error {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Index full: {0}")]
+    IndexFull(String),
 }
 
 impl IntoResponse for Error {
@@ -52,6 +55,10 @@ impl IntoResponse for Error {
             Error::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             Error::InvalidPath(_) | Error::InvalidEntry(_) => {
                 (StatusCode::BAD_REQUEST, self.to_string())
+            }
+            Error::IndexFull(_) => {
+                tracing::warn!("Index capacity exceeded: {}", self);
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
             }
             Error::Database(_) | Error::Storage(_) | Error::Io(_) => {
                 tracing::error!("Internal error: {}", self);

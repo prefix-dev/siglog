@@ -36,6 +36,7 @@ const CONTENT_TYPE_TLOG_SIZE: &str = "text/x.tlog.size";
 /// with Content-Type: text/x.tlog.size
 pub async fn add_checkpoint(State(witness): State<Arc<Witness>>, body: Bytes) -> Response {
     // Parse body as UTF-8
+    // Note: Request size limit is enforced by DefaultBodyLimit layer in witness router
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(e) => {

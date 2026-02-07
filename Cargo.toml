@@ -31,6 +31,8 @@ path = "src/bin/witness.rs"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower = "0.5"
+tower_governor = "0.8"
 
 # Storage
 opendal = { version = "0.51", features = ["services-s3", "services-memory", "services-fs"] }
@@ -73,6 +75,9 @@ futures = "0.3"
 # HTTP client for CLI tools
 reqwest = { version = "0.13", features = ["json", "blocking"] }
 indicatif = "0.18.3"
+
+# Optimization
+smallvec = "1.13"
 
 [dev-dependencies]
 tempfile = "3"
