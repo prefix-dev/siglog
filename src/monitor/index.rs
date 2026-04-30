@@ -95,6 +95,11 @@ impl ContentIndex {
                         });
                     }
                 }
+
+                if entry.index == current_index {
+                    return None;
+                }
+
                 // Same key, same value (or no value check) - duplicate
                 return Some(IndexViolation {
                     kind: ViolationKind::DuplicateKey,
@@ -121,6 +126,11 @@ impl ContentIndex {
                     });
                 }
             }
+
+            if *first_index == current_index {
+                return None;
+            }
+
             // Same key found
             return Some(IndexViolation {
                 kind: ViolationKind::DuplicateKey,
@@ -154,6 +164,13 @@ impl ContentIndex {
     /// Call `commit()` to finalize all pending entries.
     pub async fn stage(&self, key: String, index: u64, value: Option<String>) {
         let mut pending = self.pending.write().await;
+        if pending.iter().any(|entry| {
+            entry.key.as_str() == key.as_str()
+                && entry.index == index
+                && entry.value.as_deref() == value.as_deref()
+        }) {
+            return;
+        }
         pending.push(PendingEntry { key, index, value });
     }
 
@@ -218,6 +235,15 @@ impl ContentIndex {
             .collect();
 
         entries
+    }
+
+    /// Return a snapshot of pending entries without committing or draining them.
+    pub async fn pending_entries_snapshot(&self) -> Vec<(String, u64, Option<String>)> {
+        let pending = self.pending.read().await;
+        pending
+            .iter()
+            .map(|entry| (entry.key.clone(), entry.index, entry.value.clone()))
+            .collect()
     }
 }
 
@@ -352,6 +378,27 @@ mod tests {
 
         // Still findable after commit
         assert!(index.contains("key1").await);
+    }
+
+    #[tokio::test]
+    async fn test_content_index_same_index_is_idempotent() {
+        let index = ContentIndex::new("test");
+
+        index
+            .stage("key1".to_string(), 7, Some("value1".to_string()))
+            .await;
+
+        let violation = index.check("key1", 7, Some("value1")).await;
+        assert!(violation.is_none());
+
+        index.commit().await;
+
+        let violation = index.check("key1", 7, Some("value1")).await;
+        assert!(violation.is_none());
+
+        let violation = index.check("key1", 8, Some("value1")).await;
+        assert!(violation.is_some());
+        assert_eq!(violation.unwrap().kind, ViolationKind::DuplicateKey);
     }
 
     #[tokio::test]

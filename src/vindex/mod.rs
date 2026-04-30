@@ -167,6 +167,9 @@ impl VerifiableIndex {
     /// Default maximum number of indices per key (1000 indices per key).
     const DEFAULT_MAX_INDICES_PER_KEY: usize = 1000;
 
+    /// Maximum number of keys that can be represented for one entry in the WAL.
+    const MAX_KEYS_PER_ENTRY: usize = u8::MAX as usize;
+
     /// Read max_keys from environment or use default.
     fn get_max_keys() -> usize {
         std::env::var("VINDEX_MAX_KEYS")
@@ -261,6 +264,14 @@ impl VerifiableIndex {
             actual_wal_size
         );
 
+        if actual_wal_size < expected_tree_size {
+            return Err(Error::Internal(format!(
+                "vindex WAL is behind database state: WAL tree_size={}, database integrated_size={}. \
+                 Rebuild the vindex before enabling it.",
+                actual_wal_size, expected_tree_size
+            )));
+        }
+
         // Create or open WAL
         let mut tree_size = 0u64;
         let mut index: HashMap<IndexKey, Vec<LogIndex>> = HashMap::new();
@@ -329,7 +340,21 @@ impl VerifiableIndex {
     pub fn index_entry(&self, idx: LogIndex, data: &[u8]) -> Result<()> {
         let keys = self.map_fn.map(data);
 
+        if keys.len() > Self::MAX_KEYS_PER_ENTRY {
+            return Err(Error::InvalidEntry(format!(
+                "too many vindex keys for entry {}: {} (max {})",
+                idx.value(),
+                keys.len(),
+                Self::MAX_KEYS_PER_ENTRY
+            )));
+        }
+
         if keys.is_empty() {
+            if let Some(wal) = &self.wal_writer {
+                let mut wal = wal.write().unwrap();
+                wal.append(idx, &keys)?;
+            }
+
             // Still need to update tree size even if no keys
             let mut tree_size = self.tree_size.write().unwrap();
             *tree_size = (*tree_size).max(idx.value() + 1);
@@ -644,6 +669,39 @@ mod tests {
             .unwrap();
         let root3 = index.root_hash();
         assert_ne!(root3, root2);
+    }
+
+    #[test]
+    fn test_wal_records_entries_with_no_keys() {
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        let path = temp_file.path();
+
+        {
+            let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+            let index = VerifiableIndex::with_wal(map_fn, path, 0).unwrap();
+            index
+                .index_entry(LogIndex::new(0), br#"{"version":"1.0.0"}"#)
+                .unwrap();
+            index.flush().unwrap();
+            assert_eq!(index.tree_size(), 1);
+            assert_eq!(index.key_count(), 0);
+        }
+
+        let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+        let index = VerifiableIndex::with_wal(map_fn, path, 1).unwrap();
+        assert_eq!(index.tree_size(), 1);
+        assert_eq!(index.key_count(), 0);
+    }
+
+    #[test]
+    fn test_wal_must_cover_expected_tree_size() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("missing.wal");
+
+        let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+        let result = VerifiableIndex::with_wal(map_fn, path, 1);
+
+        assert!(result.is_err());
     }
 
     #[test]

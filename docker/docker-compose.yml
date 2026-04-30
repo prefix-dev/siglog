@@ -1,11 +1,12 @@
 # Local development setup for siglog transparency log ecosystem
 #
 # Setup:
-#   uv run scripts/setup_local.py   # Generates .env with keys
+#   Create a .env file with LOG_PRIVATE_KEY, LOG_PUBLIC_KEY,
+#   WITNESS_PRIVATE_KEY, and MONITOR_PRIVATE_KEY.
 #
 # Usage:
-#   docker compose build
-#   docker compose up
+#   docker compose -f docker/docker-compose.yml build
+#   docker compose -f docker/docker-compose.yml up
 #
 # This runs three services:
 #   - log: The transparency log server (port 8080)
@@ -22,8 +23,8 @@
 services:
   log:
     build:
-      context: .
-      dockerfile: Dockerfile.local
+      context: ..
+      dockerfile: docker/Dockerfile.local
     command:
       - siglog
       - --database-url=sqlite:/data/siglog.db?mode=rwc
@@ -35,6 +36,7 @@ services:
       - --checkpoint-interval=1
       - --batch-max-size=256
       - --batch-max-age-ms=500
+      - --allow-public-writes
       - --vindex-enabled
       - --vindex-key-field=name
       - --external-witnesses=witness=http://witness:8080,monitor=http://monitor:8080
@@ -45,7 +47,7 @@ services:
     volumes:
       - log-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ready"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -53,8 +55,8 @@ services:
 
   witness:
     build:
-      context: .
-      dockerfile: Dockerfile.local
+      context: ..
+      dockerfile: docker/Dockerfile.local
     command:
       - witness
       - --database-url=sqlite:/data/witness.db?mode=rwc
@@ -71,7 +73,7 @@ services:
       log:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ready"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -105,8 +107,8 @@ services:
 
   monitor:
     build:
-      context: .
-      dockerfile: Dockerfile.local
+      context: ..
+      dockerfile: docker/Dockerfile.local
     command:
       - conda-monitor
       - --database-url=sqlite:/data/monitor.db?mode=rwc
@@ -123,7 +125,7 @@ services:
       log:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ready"]
       interval: 5s
       timeout: 3s
       retries: 10

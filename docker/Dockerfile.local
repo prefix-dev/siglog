@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
 # Copy source code
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
+COPY crates ./crates
 
 # Build all release binaries
 RUN cargo build --release --bin siglog --bin witness --bin conda-monitor

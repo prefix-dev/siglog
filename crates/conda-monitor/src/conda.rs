@@ -184,8 +184,7 @@ impl Monitor for CondaMonitor {
     ) -> Result<()> {
         let store = ContentIndexStore::new(Arc::new(conn.clone()));
 
-        // Commit SHA256 index and persist to database
-        let sha256_entries = self.sha256_index.commit_and_drain().await;
+        let sha256_entries = self.sha256_index.pending_entries_snapshot().await;
         if !sha256_entries.is_empty() {
             store
                 .save(self.sha256_index.name(), origin, &sha256_entries)
@@ -193,8 +192,7 @@ impl Monitor for CondaMonitor {
             tracing::debug!("Persisted {} SHA256 entries", sha256_entries.len());
         }
 
-        // Commit filename index and persist to database
-        let filename_entries = self.filename_index.commit_and_drain().await;
+        let filename_entries = self.filename_index.pending_entries_snapshot().await;
         if !filename_entries.is_empty() {
             store
                 .save(self.filename_index.name(), origin, &filename_entries)
@@ -202,6 +200,15 @@ impl Monitor for CondaMonitor {
             tracing::debug!("Persisted {} filename entries", filename_entries.len());
         }
 
+        self.sha256_index.commit().await;
+        self.filename_index.commit().await;
+
+        Ok(())
+    }
+
+    async fn rollback_entries(&self) -> Result<()> {
+        self.sha256_index.rollback().await;
+        self.filename_index.rollback().await;
         Ok(())
     }
 

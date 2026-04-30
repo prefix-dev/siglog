@@ -165,6 +165,12 @@ impl Witness {
     pub async fn get_state(&self, origin: &str) -> Result<Option<WitnessedState>> {
         self.state_store.get(origin).await
     }
+
+    /// Validate that the witness can read its persisted state.
+    pub async fn ready(&self) -> Result<()> {
+        let _ = self.state_store.list().await?;
+        Ok(())
+    }
 }
 
 /// Request to add a checkpoint for witnessing.

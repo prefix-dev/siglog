@@ -1,7 +1,9 @@
 //! Background workers for integration and checkpoint publishing.
 
-use crate::checkpoint::signer::{Checkpoint, CheckpointSigner, CosignedCheckpoint, Origin};
-use crate::error::Result;
+use crate::checkpoint::signer::{
+    Checkpoint, CheckpointSignature, CheckpointSigner, CosignedCheckpoint, Origin,
+};
+use crate::error::{Error, Result};
 use crate::merkle::integrate::integrate;
 use crate::merkle::{generate_consistency_proof_simple, EntryBundle};
 use crate::storage::opendal::CheckpointData;
@@ -149,6 +151,17 @@ async fn run_integration_cycle(
         return Ok(());
     }
 
+    for (offset, entry) in pending.iter().enumerate() {
+        let expected_index = state.integrated_size.value() + offset as u64;
+        if entry.index.value() != expected_index {
+            return Err(crate::error::Error::Internal(format!(
+                "pending entries are not contiguous: expected index {}, got {}",
+                expected_index,
+                entry.index.value()
+            )));
+        }
+    }
+
     // Collect leaf hashes
     let leaf_hashes: Vec<_> = pending.iter().map(|e| e.leaf_hash).collect();
 
@@ -194,9 +207,20 @@ async fn run_integration_cycle(
         );
     }
 
-    // Mark entries as integrated
-    db.mark_integrated(result.new_size, result.root_hash)
+    // Mark entries as integrated only if another worker has not advanced the
+    // tree since this cycle started.
+    let marked = db
+        .mark_integrated_if_current(state.integrated_size, result.new_size, result.root_hash)
         .await?;
+
+    if !marked {
+        tracing::warn!(
+            "Skipping stale integration result from size {} to {}; another worker advanced first",
+            state.integrated_size.value(),
+            result.new_size.value()
+        );
+        return Ok(());
+    }
 
     tracing::info!(
         "Integrated {} entries, new size: {}, root: {}",
@@ -363,6 +387,8 @@ async fn publish_checkpoint(
         cosigned.add_signature(witness);
     }
 
+    let mut external_signature_count = 0usize;
+
     // Call external witnesses and merge their signatures
     for ext_witness in external_witnesses {
         let old_size = witness_state.get_size(&ext_witness.url);
@@ -404,7 +430,9 @@ async fn publish_checkpoint(
         .await
         {
             Ok(signature_line) => {
-                if let Err(e) = cosigned.add_signature_line(&signature_line) {
+                if let Err(e) =
+                    add_external_signature_line(&mut cosigned, &ext_witness.name, &signature_line)
+                {
                     tracing::warn!(
                         "Failed to parse signature from external witness {}: {}",
                         ext_witness.name,
@@ -412,6 +440,7 @@ async fn publish_checkpoint(
                     );
                 } else {
                     witness_state.set_size(&ext_witness.url, new_size);
+                    external_signature_count += 1;
                     tracing::debug!("Got signature from external witness: {}", ext_witness.name);
                 }
             }
@@ -423,6 +452,16 @@ async fn publish_checkpoint(
                 );
             }
         }
+    }
+
+    if external_signature_count < external_witnesses.len() {
+        tracing::warn!(
+            "Not publishing checkpoint size {}: got {}/{} external witness signatures",
+            new_size,
+            external_signature_count,
+            external_witnesses.len()
+        );
+        return Ok(());
     }
 
     let text = cosigned.to_text();
@@ -441,6 +480,26 @@ async fn publish_checkpoint(
         root_hash.to_hex(),
         cosigned.signature_count()
     );
+
+    Ok(())
+}
+
+fn add_external_signature_line(
+    cosigned: &mut CosignedCheckpoint,
+    expected_name: &str,
+    line: &str,
+) -> Result<()> {
+    let sig = CheckpointSignature::from_line(line)?;
+    if sig.name.as_str() != expected_name {
+        return Err(Error::Config(format!(
+            "witness name mismatch: expected '{}', got '{}'",
+            expected_name, sig.name
+        )));
+    }
+
+    if !cosigned.has_signature_from(&sig.name) {
+        cosigned.signatures.push(sig);
+    }
 
     Ok(())
 }

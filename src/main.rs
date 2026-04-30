@@ -1,5 +1,6 @@
 //! Siglog - A minimal Tessera-compatible transparency log server.
 
+use axum::extract::DefaultBodyLimit;
 use clap::Parser;
 use siglog::api::handlers::{self, AppState};
 use siglog::api::rate_limit;
@@ -19,11 +20,15 @@ use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 #[command(about = "A minimal Tessera-compatible transparency log server")]
 struct Args {
     /// Database URL (PostgreSQL: postgres://... or SQLite: sqlite:./path.db)
-    #[arg(long, env = "DATABASE_URL")]
+    #[arg(
+        long,
+        env = "DATABASE_URL",
+        default_value = "sqlite:./siglog.db?mode=rwc"
+    )]
     database_url: String,
 
     /// Storage backend: "s3" or "fs"
-    #[arg(long, env = "STORAGE_BACKEND", default_value = "s3")]
+    #[arg(long, env = "STORAGE_BACKEND", default_value = "fs")]
     storage_backend: String,
 
     /// Filesystem storage root directory (when storage_backend=fs)
@@ -59,7 +64,7 @@ struct Args {
     private_key: String,
 
     /// Server listen address
-    #[arg(long, env = "LISTEN_ADDR", default_value = "0.0.0.0:2025")]
+    #[arg(long, env = "LISTEN_ADDR", default_value = "0.0.0.0:8080")]
     listen: String,
 
     /// Checkpoint publish interval in seconds
@@ -90,6 +95,12 @@ struct Args {
     /// When set, the /add endpoint requires an Authorization: Bearer <key> header.
     #[arg(long, env = "API_KEY")]
     api_key: Option<String>,
+
+    /// Allow unauthenticated writes to /add.
+    ///
+    /// This is intended for local development and test deployments.
+    #[arg(long, env = "ALLOW_PUBLIC_WRITES")]
+    allow_public_writes: bool,
 
     /// Enable verifiable index (vindex) for key lookups.
     #[arg(long, env = "VINDEX_ENABLED")]
@@ -122,6 +133,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Origin: {}", args.origin);
     tracing::info!("Listen: {}", args.listen);
 
+    if args.api_key.is_none() && !args.allow_public_writes {
+        anyhow::bail!(
+            "API_KEY is required for /add writes. Set --allow-public-writes for local development."
+        );
+    }
+
     // Initialize database
     tracing::info!("Connecting to database...");
     let db = Database::connect(&args.database_url).await?;
@@ -133,10 +150,14 @@ async fn main() -> anyhow::Result<()> {
         "fs" => {
             let root = args
                 .fs_root
+                .clone()
+                .or_else(|| std::env::var("STORAGE_PATH").ok())
+                .or_else(|| Some("./tiles".to_string()))
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("--fs-root is required when storage_backend=fs"))?;
+                .expect("filesystem storage root default missing")
+                .to_string();
             tracing::info!("Initializing filesystem storage at {}...", root);
-            TileStorage::new_fs(root)?
+            TileStorage::new_fs(&root)?
         }
         "s3" => {
             let endpoint = args.s3_endpoint.as_ref().ok_or_else(|| {
@@ -239,11 +260,11 @@ async fn main() -> anyhow::Result<()> {
         );
         let map_fn = Arc::new(vindex::JsonKeysMapFn::new(&args.vindex_key_field));
 
+        let log_state = db.get_log_state().await?;
+        let expected_tree_size = log_state.integrated_size.value();
+
         let vi = if let Some(wal_path) = &args.vindex_wal_path {
-            // Get the integrated_size from the database for WAL validation
-            // This ensures we truncate the WAL to match the database state after a crash
-            let log_state = db.get_log_state().await?;
-            let expected_tree_size = log_state.integrated_size.value();
+            // Validate the WAL against the database state after a crash.
             tracing::info!(
                 "Vindex WAL path: {}, expected tree size from DB: {}",
                 wal_path,
@@ -251,6 +272,13 @@ async fn main() -> anyhow::Result<()> {
             );
             vindex::VerifiableIndex::with_wal(map_fn, wal_path, expected_tree_size)?
         } else {
+            if expected_tree_size > 0 {
+                anyhow::bail!(
+                    "VINDEX_WAL_PATH is required when enabling vindex for an existing log \
+                     (integrated_size={})",
+                    expected_tree_size
+                );
+            }
             vindex::VerifiableIndex::new(map_fn)
         };
         tracing::info!(
@@ -284,10 +312,12 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Build application state
-    let mut state = AppState::new(storage, sequencer);
+    let mut state = AppState::new(storage, sequencer, db.clone());
     if let Some(api_key) = args.api_key {
         tracing::info!("API key authentication enabled for /add endpoint");
         state = state.with_api_key(api_key);
+    } else {
+        tracing::warn!("Public unauthenticated writes are enabled for /add endpoint");
     }
     if let Some(ref vi) = vindex {
         state = state.with_vindex(vi.clone());
@@ -302,7 +332,8 @@ async fn main() -> anyhow::Result<()> {
             .finish()
             .expect("failed to create rate limit config"),
     );
-    let governor_layer = GovernorLayer::new(rate_limit_config);
+    let governor_layer =
+        GovernorLayer::new(rate_limit_config).error_handler(rate_limit::rate_limit_error_handler);
     tracing::info!(
         "Rate limiting enabled: {} req/s per IP, burst {}",
         rate_limit::RATE_LIMIT_PER_SECOND,
@@ -321,7 +352,8 @@ async fn main() -> anyhow::Result<()> {
             "/tile/entries/{*path}",
             axum::routing::get(handlers::get_entries),
         )
-        .route("/health", axum::routing::get(handlers::health));
+        .route("/health", axum::routing::get(handlers::health))
+        .route("/ready", axum::routing::get(handlers::ready));
 
     // Add vindex routes if enabled
     if vindex.is_some() {
@@ -338,11 +370,19 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Vindex API enabled at /vindex/lookup/*");
     }
 
-    let app = app.with_state(state).layer(governor_layer).layer(
-        tower_http::trace::TraceLayer::new_for_http()
-            .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO))
-            .on_response(tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO)),
-    );
+    let app = app
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(handlers::MAX_ENTRY_SIZE))
+        .layer(governor_layer)
+        .layer(
+            tower_http::trace::TraceLayer::new_for_http()
+                .make_span_with(
+                    tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO),
+                )
+                .on_response(
+                    tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO),
+                ),
+        );
 
     // Start server
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;

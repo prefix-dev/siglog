@@ -3,7 +3,7 @@
 use crate::api::paths;
 use crate::error::{Error, Result};
 use crate::sequencer::Sequencer;
-use crate::storage::TileStorage;
+use crate::storage::{Database, TileStorage};
 use crate::types::Entry;
 use crate::vindex::VerifiableIndex;
 use axum::{
@@ -16,14 +16,16 @@ use axum::{
 use serde::Serialize;
 use std::sync::Arc;
 
-/// Maximum entry size in bytes (10 MB).
-/// This prevents DoS attacks via extremely large entries that could exhaust
-/// memory, disk space, or database storage.
-const MAX_ENTRY_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+/// Maximum entry size in bytes.
+///
+/// Entry bundles use a 2-byte length prefix, so accepting larger entries would
+/// make the public tile data impossible to parse correctly.
+pub const MAX_ENTRY_SIZE: usize = u16::MAX as usize;
 
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
+    pub db: Database,
     pub storage: TileStorage,
     pub sequencer: Sequencer,
     /// Optional verifiable index for key lookups.
@@ -33,8 +35,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(storage: TileStorage, sequencer: Sequencer) -> Self {
+    pub fn new(storage: TileStorage, sequencer: Sequencer, db: Database) -> Self {
         Self {
+            db,
             storage,
             sequencer,
             vindex: None,
@@ -69,7 +72,7 @@ pub async fn add_entry(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "));
         match provided {
-            Some(token) if token == expected_key => {}
+            Some(token) if constant_time_eq(token.as_bytes(), expected_key.as_bytes()) => {}
             _ => return Err(Error::Unauthorized),
         }
     }
@@ -94,6 +97,18 @@ pub async fn add_entry(
     // Return index as decimal string
     let response = (StatusCode::OK, index.to_string());
     Ok(response.into_response())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    let mut diff = 0u8;
+    for (&left, &right) in a.iter().zip(b.iter()) {
+        diff |= left ^ right;
+    }
+    diff == 0
 }
 
 /// GET /checkpoint - Get the current checkpoint.
@@ -171,6 +186,31 @@ pub async fn get_entries(
 /// Health check endpoint.
 pub async fn health() -> &'static str {
     "ok"
+}
+
+/// Readiness check endpoint.
+///
+/// This validates access to the database and tile storage.
+pub async fn ready(State(state): State<Arc<AppState>>) -> Result<Response> {
+    let log_state = state.db.get_log_state().await?;
+    let _ = state.storage.read_checkpoint().await?;
+
+    #[derive(Serialize)]
+    struct ReadyResponse {
+        status: &'static str,
+        next_index: u64,
+        integrated_size: u64,
+        pending_count: u64,
+    }
+
+    let response = ReadyResponse {
+        status: "ready",
+        next_index: log_state.next_index.value(),
+        integrated_size: log_state.integrated_size.value(),
+        pending_count: log_state.pending_count(),
+    };
+
+    Ok((StatusCode::OK, Json(response)).into_response())
 }
 
 /// A proof node from the prefix tree.

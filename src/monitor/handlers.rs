@@ -177,6 +177,19 @@ pub async fn health() -> &'static str {
     "ok"
 }
 
+/// GET /ready - Readiness check.
+pub async fn ready<M: Monitor + 'static>(
+    State(witness): State<Arc<MonitoringWitness<M>>>,
+) -> Response {
+    match witness.ready().await {
+        Ok(()) => (StatusCode::OK, "ready").into_response(),
+        Err(e) => {
+            tracing::error!("Monitor readiness check failed: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "not ready").into_response()
+        }
+    }
+}
+
 /// GET /stats - Get monitor statistics.
 #[derive(Debug, Serialize)]
 pub struct MonitorStatsResponse {

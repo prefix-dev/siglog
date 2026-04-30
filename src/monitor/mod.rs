@@ -104,6 +104,11 @@ pub trait Monitor: Send + Sync {
         to_index: u64,
     ) -> Result<()>;
 
+    /// Roll back entries staged during a failed validation attempt.
+    async fn rollback_entries(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Get the name of this monitor (for logging/identification).
     fn name(&self) -> &str;
 }
@@ -259,8 +264,18 @@ impl<M: Monitor> MonitoringWitness<M> {
                 MonitorError::Witness(WitnessError::Internal("log URL not configured".to_string()))
             })?;
 
-            self.validate_new_entries(log_url, state.size, new_size)
-                .await?;
+            if let Err(err) = self
+                .validate_new_entries(log_url, state.size, new_size)
+                .await
+            {
+                if let Err(rollback_err) = self.monitor.rollback_entries().await {
+                    tracing::warn!(
+                        "failed to roll back monitor entries after validation error: {}",
+                        rollback_err
+                    );
+                }
+                return Err(err);
+            }
         }
 
         // 9. Create cosignature
@@ -418,6 +433,12 @@ impl<M: Monitor> MonitoringWitness<M> {
     /// Get the current witnessed state for a log.
     pub async fn get_state(&self, origin: &str) -> Result<Option<WitnessedState>> {
         self.state_store.get(origin).await
+    }
+
+    /// Validate that the monitor witness can read persisted witness state.
+    pub async fn ready(&self) -> Result<()> {
+        let _ = self.state_store.list().await?;
+        Ok(())
     }
 }
 

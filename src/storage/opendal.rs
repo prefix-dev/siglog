@@ -146,7 +146,7 @@ impl TileStorage {
         bundle: &EntryBundle,
     ) -> Result<()> {
         let path = paths::entries_path(index.value(), partial.value());
-        let data = bundle.to_bytes();
+        let data = bundle.to_bytes()?;
 
         self.op.write(&path, data).await.map_err(Into::into)
     }

@@ -168,16 +168,41 @@ impl Database {
             .collect()
     }
 
-    /// Mark entries as integrated up to the given size.
+    /// Mark entries as integrated up to the given size if the state has not
+    /// changed since the caller read it.
     ///
     /// Updates the integrated size and root hash, and deletes pending entries.
-    pub async fn mark_integrated(&self, new_size: TreeSize, root_hash: Sha256Hash) -> Result<()> {
+    pub async fn mark_integrated_if_current(
+        &self,
+        expected_current_size: TreeSize,
+        new_size: TreeSize,
+        root_hash: Sha256Hash,
+    ) -> Result<bool> {
+        if new_size < expected_current_size {
+            return Err(Error::Internal(format!(
+                "refusing to move integrated size backward: current={}, new={}",
+                expected_current_size.value(),
+                new_size.value()
+            )));
+        }
+
         let txn = self.conn.begin().await?;
+
+        let state = log_state::Entity::find_by_id(1)
+            .lock_exclusive()
+            .one(&txn)
+            .await?
+            .ok_or_else(|| Error::Internal("log state not found".into()))?;
+
+        if state.integrated_size as u64 != expected_current_size.value() {
+            txn.rollback().await?;
+            return Ok(false);
+        }
 
         // Update log state
         log_state::Entity::update(log_state::ActiveModel {
             id: ActiveValue::Unchanged(1),
-            next_index: ActiveValue::NotSet,
+            next_index: ActiveValue::Unchanged(state.next_index),
             integrated_size: ActiveValue::Set(new_size.value() as i64),
             root_hash: ActiveValue::Set(Some(root_hash.as_bytes().to_vec())),
         })
@@ -192,7 +217,7 @@ impl Database {
 
         txn.commit().await?;
 
-        Ok(())
+        Ok(true)
     }
 }
 

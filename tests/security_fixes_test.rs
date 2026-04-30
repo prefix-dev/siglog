@@ -5,16 +5,12 @@
 //! 2. Origin validation rejects malformed origins
 //! 3. Rate limiting is properly configured
 
-use siglog::api::rate_limit;
+use siglog::api::{handlers, rate_limit};
 use siglog::checkpoint::signer::Origin;
 
 #[test]
 fn test_max_entry_size_constant() {
-    // Verify MAX_ENTRY_SIZE constant exists and is reasonable
-    // This is tested indirectly through the API handler
-    // but we verify the rate limit constants are set
-    assert!(rate_limit::RATE_LIMIT_PER_SECOND > 0);
-    assert!(rate_limit::RATE_LIMIT_BURST_SIZE > 0);
+    assert_eq!(handlers::MAX_ENTRY_SIZE, u16::MAX as usize);
 }
 
 #[test]

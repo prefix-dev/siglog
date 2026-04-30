@@ -99,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::post(handlers::add_checkpoint),
         )
         .route("/health", axum::routing::get(handlers::health))
+        .route("/ready", axum::routing::get(handlers::ready))
         .with_state(witness)
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .layer(

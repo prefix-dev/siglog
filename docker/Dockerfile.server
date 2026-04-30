@@ -34,7 +34,7 @@ RUN mkdir -p /data
 ENV LISTEN_ADDR=0.0.0.0:8080
 ENV DATABASE_URL=sqlite:/data/tessera.db?mode=rwc
 ENV STORAGE_BACKEND=fs
-ENV STORAGE_PATH=/data/tiles
+ENV FS_ROOT=/data/tiles
 
 EXPOSE 8080
 

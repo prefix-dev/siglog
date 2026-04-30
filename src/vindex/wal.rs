@@ -84,6 +84,15 @@ impl BinaryWalWriter {
     ///
     /// Format: [u8 version][u64 index][u8 key_count][keys...]
     pub fn append(&mut self, idx: LogIndex, keys: &[IndexKey]) -> Result<()> {
+        if keys.len() > u8::MAX as usize {
+            return Err(Error::InvalidEntry(format!(
+                "too many WAL keys for entry {}: {} (max {})",
+                idx.value(),
+                keys.len(),
+                u8::MAX
+            )));
+        }
+
         // Version marker
         self.writer
             .write_all(&[WAL_VERSION_BINARY])
@@ -95,13 +104,13 @@ impl BinaryWalWriter {
             .map_err(|e| Error::Internal(format!("failed to write to WAL: {}", e)))?;
 
         // Key count (1 byte, limiting to 255 keys per entry)
-        let key_count = keys.len().min(255) as u8;
+        let key_count = keys.len() as u8;
         self.writer
             .write_all(&[key_count])
             .map_err(|e| Error::Internal(format!("failed to write to WAL: {}", e)))?;
 
         // Keys (32 bytes each)
-        for key in keys.iter().take(255) {
+        for key in keys {
             self.writer
                 .write_all(key)
                 .map_err(|e| Error::Internal(format!("failed to write to WAL: {}", e)))?;
@@ -156,6 +165,15 @@ impl BatchedBinaryWalWriter {
 
     /// Append an entry to the buffer.
     pub fn append(&mut self, idx: LogIndex, keys: Vec<IndexKey>) -> Result<()> {
+        if keys.len() > u8::MAX as usize {
+            return Err(Error::InvalidEntry(format!(
+                "too many WAL keys for entry {}: {} (max {})",
+                idx.value(),
+                keys.len(),
+                u8::MAX
+            )));
+        }
+
         self.buffer.push((idx, keys));
 
         if self.buffer.len() >= self.batch_size {
@@ -194,13 +212,13 @@ impl BatchedBinaryWalWriter {
                 .map_err(|e| Error::Internal(format!("failed to write to WAL: {}", e)))?;
 
             // Key count
-            let key_count = keys.len().min(255) as u8;
+            let key_count = keys.len() as u8;
             self.writer
                 .write_all(&[key_count])
                 .map_err(|e| Error::Internal(format!("failed to write to WAL: {}", e)))?;
 
             // Keys
-            for key in keys.iter().take(255) {
+            for key in keys {
                 self.writer
                     .write_all(key)
                     .map_err(|e| Error::Internal(format!("failed to write to WAL: {}", e)))?;

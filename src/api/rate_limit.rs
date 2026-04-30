@@ -41,7 +41,11 @@ mod tests {
 
     #[test]
     fn test_rate_limit_constants() {
-        assert!(RATE_LIMIT_PER_SECOND > 0);
-        assert!(RATE_LIMIT_BURST_SIZE > 0);
+        let config = tower_governor::governor::GovernorConfigBuilder::default()
+            .per_second(RATE_LIMIT_PER_SECOND)
+            .burst_size(RATE_LIMIT_BURST_SIZE)
+            .finish();
+
+        assert!(config.is_some());
     }
 }

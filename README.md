@@ -72,21 +72,24 @@ cargo build --release
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `LISTEN_ADDR` | Server listen address | `0.0.0.0:8080` |
-| `DATABASE_URL` | Database connection string | `sqlite:./siglog.db` |
-| `LOG_ORIGIN` | Log origin identifier | `transparency-log` |
+| `DATABASE_URL` | Database connection string | `sqlite:./siglog.db?mode=rwc` |
+| `LOG_ORIGIN` | Log origin identifier | Required |
 | `LOG_PRIVATE_KEY` | Ed25519 signing key (note format) | Required |
 | `STORAGE_BACKEND` | Storage type: `s3` or `fs` | `fs` |
-| `STORAGE_PATH` | Filesystem storage path | `./tiles` |
+| `FS_ROOT` | Filesystem storage path (`STORAGE_PATH` is also accepted for compatibility) | `./tiles` |
 | `S3_BUCKET` | S3 bucket name | - |
 | `S3_ACCESS_KEY` | S3 access key | - |
 | `S3_SECRET_KEY` | S3 secret key | - |
 | `S3_ENDPOINT` | S3 endpoint URL | - |
 | `S3_REGION` | S3 region | `auto` |
-| `CHECKPOINT_INTERVAL` | Checkpoint frequency (seconds) | `5` |
+| `API_KEY` | Bearer token required for `/add` writes | Required unless `ALLOW_PUBLIC_WRITES=true` |
+| `ALLOW_PUBLIC_WRITES` | Allow unauthenticated `/add` writes for local development | `false` |
+| `CHECKPOINT_INTERVAL` | Checkpoint frequency (seconds) | `1` |
 | `BATCH_MAX_SIZE` | Max entries per batch | `256` |
-| `BATCH_MAX_AGE_MS` | Max batch age (ms) | `2000` |
+| `BATCH_MAX_AGE_MS` | Max batch age (ms) | `1000` |
 | `VINDEX_ENABLED` | Enable verifiable index | `false` |
 | `VINDEX_KEY_FIELD` | JSON field for key extraction | `name` |
+| `VINDEX_WAL_PATH` | WAL path for persistent vindex recovery | Required when enabling vindex on a non-empty log |
 
 #### Witness Server (`witness`)
 
@@ -146,12 +149,12 @@ print(f"Public:  {public_note}")
 The easiest way to run locally is with Docker Compose:
 
 ```bash
-# Generate keys and create .env file
-python scripts/setup_local.py
+# Create a .env file with LOG_PRIVATE_KEY, LOG_PUBLIC_KEY,
+# WITNESS_PRIVATE_KEY, and MONITOR_PRIVATE_KEY.
 
 # Build and start services
-docker compose build
-docker compose up
+docker compose -f docker/docker-compose.yml build
+docker compose -f docker/docker-compose.yml up
 ```
 
 This starts:
@@ -166,7 +169,8 @@ export LOG_ORIGIN="my-transparency-log"
 export LOG_PRIVATE_KEY="PRIVATE+KEY+my-transparency-log+xxxx+..."
 export DATABASE_URL="sqlite:./siglog.db"
 export STORAGE_BACKEND="fs"
-export STORAGE_PATH="./tiles"
+export FS_ROOT="./tiles"
+export API_KEY="local-dev-token"
 
 ./target/release/siglog
 
@@ -198,6 +202,7 @@ A witness independently verifies and co-signs transparency log checkpoints. Runn
 |----------|--------|-------------|
 | `/add-checkpoint` | POST | Submit a checkpoint for co-signing |
 | `/health` | GET | Health check |
+| `/ready` | GET | Readiness check |
 
 #### POST /add-checkpoint
 
@@ -223,11 +228,13 @@ Response (on success): The witness's cosignature line.
 | `/tile/{level}/{index}` | GET | Get a Merkle tree tile |
 | `/tile/entries/{index}` | GET | Get an entry bundle |
 | `/health` | GET | Health check |
+| `/ready` | GET | Readiness check |
 
 ### Add Entry
 
 ```bash
 curl -X POST http://localhost:8080/add \
+  -H "Authorization: Bearer local-dev-token" \
   -H "Content-Type: application/json" \
   -d '{"name": "my-package", "version": "1.0.0", "sha256": "abc123..."}'
 ```
@@ -265,8 +272,6 @@ curl http://localhost:8080/tile/entries/000
 
 ### Fly.io
 
-See [DEPLOY.md](DEPLOY.md) for detailed Fly.io deployment instructions using LiteFS and Tigris.
-
 Quick start:
 ```bash
 # Create app and storage
@@ -277,6 +282,7 @@ fly volumes create litefs --size 1
 
 # Set secrets
 fly secrets set LOG_PRIVATE_KEY="PRIVATE+KEY+..."
+fly secrets set API_KEY="..."
 fly secrets set S3_ACCESS_KEY="..." S3_SECRET_KEY="..." S3_BUCKET="..."
 
 # Deploy
@@ -303,6 +309,7 @@ docker run -d \
   -v siglog-data:/data \
   -e LOG_ORIGIN="my-transparency-log" \
   -e LOG_PRIVATE_KEY="PRIVATE+KEY+..." \
+  -e API_KEY="..." \
   ghcr.io/OWNER/REPO-server:latest
 ```
 
@@ -356,6 +363,11 @@ spec:
             secretKeyRef:
               name: siglog-secrets
               key: log-private-key
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: siglog-secrets
+              key: api-key
         - name: DATABASE_URL
           value: "postgres://user:pass@postgres:5432/siglog"
         - name: STORAGE_BACKEND

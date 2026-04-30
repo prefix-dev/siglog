@@ -94,17 +94,24 @@ impl EntryBundle {
     /// Serialize the bundle to bytes.
     ///
     /// Format: [2-byte BE length][data][2-byte BE length][data]...
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let total_size: usize = self.entries.iter().map(|e| 2 + e.len()).sum();
         let mut result = Vec::with_capacity(total_size);
 
         for entry in &self.entries {
+            if entry.len() > u16::MAX as usize {
+                return Err(Error::InvalidEntry(format!(
+                    "entry bundle item too large: {} bytes (max {})",
+                    entry.len(),
+                    u16::MAX
+                )));
+            }
             let len = entry.len() as u16;
             result.extend_from_slice(&len.to_be_bytes());
             result.extend_from_slice(entry.as_bytes());
         }
 
-        result
+        Ok(result)
     }
 
     /// Deserialize a bundle from bytes.
@@ -204,7 +211,7 @@ mod tests {
         ];
         let bundle = EntryBundle::with_entries(entries);
 
-        let bytes = bundle.to_bytes();
+        let bytes = bundle.to_bytes().unwrap();
         let parsed = EntryBundle::from_bytes(&bytes).unwrap();
 
         assert_eq!(parsed.entries.len(), 3);
@@ -216,7 +223,7 @@ mod tests {
     #[test]
     fn test_entry_bundle_empty() {
         let bundle = EntryBundle::new();
-        let bytes = bundle.to_bytes();
+        let bytes = bundle.to_bytes().unwrap();
         assert!(bytes.is_empty());
 
         let parsed = EntryBundle::from_bytes(&bytes).unwrap();
@@ -228,7 +235,7 @@ mod tests {
         let entry = EntryData::from("single entry");
         let bundle = EntryBundle::with_entries(vec![entry]);
 
-        let bytes = bundle.to_bytes();
+        let bytes = bundle.to_bytes().unwrap();
         // 2 bytes length + 12 bytes data
         assert_eq!(bytes.len(), 14);
         assert_eq!(&bytes[0..2], &[0, 12]); // Big-endian length
@@ -247,5 +254,13 @@ mod tests {
         // Partial length prefix
         let data = vec![0];
         assert!(EntryBundle::from_bytes(&data).is_err());
+    }
+
+    #[test]
+    fn test_entry_bundle_rejects_oversized_entry() {
+        let entry = EntryData::new(vec![0u8; u16::MAX as usize + 1]);
+        let bundle = EntryBundle::with_entries(vec![entry]);
+
+        assert!(bundle.to_bytes().is_err());
     }
 }

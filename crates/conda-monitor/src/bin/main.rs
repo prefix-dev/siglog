@@ -6,6 +6,7 @@
 //!
 //! It implements the C2SP tlog-witness specification with additional validation.
 
+use axum::extract::DefaultBodyLimit;
 use clap::Parser;
 use conda_monitor::{CondaMonitor, LogConfig, MonitoringWitness};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection};
@@ -14,6 +15,9 @@ use siglog::checkpoint::CheckpointSigner;
 use siglog::monitor::handlers;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Maximum allowed size for monitor witness request bodies (1MB).
+const MAX_BODY_SIZE: usize = 1024 * 1024;
 
 /// Conda Monitor - A monitoring witness for Conda package transparency logs.
 #[derive(Parser, Debug)]
@@ -126,10 +130,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/health", axum::routing::get(handlers::health))
         .route(
+            "/ready",
+            axum::routing::get(handlers::ready::<CondaMonitor>),
+        )
+        .route(
             "/stats",
             axum::routing::get(handlers::stats::<CondaMonitor>),
         )
         .with_state(witness)
+        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
                 .make_span_with(

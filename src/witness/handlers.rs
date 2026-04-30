@@ -118,3 +118,14 @@ pub async fn get_witnessed_checkpoint(
 pub async fn health() -> &'static str {
     "ok"
 }
+
+/// GET /ready - Readiness check.
+pub async fn ready(State(witness): State<Arc<Witness>>) -> Response {
+    match witness.ready().await {
+        Ok(()) => (StatusCode::OK, "ready").into_response(),
+        Err(e) => {
+            tracing::error!("Witness readiness check failed: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "not ready").into_response()
+        }
+    }
+}
