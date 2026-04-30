@@ -47,12 +47,16 @@ pub enum Error {
 
     #[error("Index full: {0}")]
     IndexFull(String),
+
+    #[error("Unauthorized")]
+    Unauthorized,
 }
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             Error::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
+            Error::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
             Error::InvalidPath(_) | Error::InvalidEntry(_) => {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }

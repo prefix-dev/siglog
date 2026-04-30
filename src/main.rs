@@ -86,6 +86,11 @@ struct Args {
     #[arg(long, env = "EXTERNAL_WITNESSES")]
     external_witnesses: Option<String>,
 
+    /// API key for authenticating write requests (optional).
+    /// When set, the /add endpoint requires an Authorization: Bearer <key> header.
+    #[arg(long, env = "API_KEY")]
+    api_key: Option<String>,
+
     /// Enable verifiable index (vindex) for key lookups.
     #[arg(long, env = "VINDEX_ENABLED")]
     vindex_enabled: bool,
@@ -280,6 +285,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Build application state
     let mut state = AppState::new(storage, sequencer);
+    if let Some(api_key) = args.api_key {
+        tracing::info!("API key authentication enabled for /add endpoint");
+        state = state.with_api_key(api_key);
+    }
     if let Some(ref vi) = vindex {
         state = state.with_vindex(vi.clone());
     }

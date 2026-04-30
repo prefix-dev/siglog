@@ -9,7 +9,7 @@ use crate::vindex::VerifiableIndex;
 use axum::{
     body::Bytes,
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -28,6 +28,8 @@ pub struct AppState {
     pub sequencer: Sequencer,
     /// Optional verifiable index for key lookups.
     pub vindex: Option<Arc<VerifiableIndex>>,
+    /// Optional API key for authenticating write requests.
+    pub api_key: Option<String>,
 }
 
 impl AppState {
@@ -36,7 +38,13 @@ impl AppState {
             storage,
             sequencer,
             vindex: None,
+            api_key: None,
         }
+    }
+
+    pub fn with_api_key(mut self, api_key: String) -> Self {
+        self.api_key = Some(api_key);
+        self
     }
 
     pub fn with_vindex(mut self, vindex: Arc<VerifiableIndex>) -> Self {
@@ -49,7 +57,23 @@ impl AppState {
 ///
 /// Request body: raw entry data bytes
 /// Response: ASCII decimal representation of assigned index
-pub async fn add_entry(State(state): State<Arc<AppState>>, body: Bytes) -> Result<Response> {
+pub async fn add_entry(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response> {
+    // Check API key if configured
+    if let Some(ref expected_key) = state.api_key {
+        let provided = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match provided {
+            Some(token) if token == expected_key => {}
+            _ => return Err(Error::Unauthorized),
+        }
+    }
+
     if body.is_empty() {
         return Err(Error::InvalidEntry("empty entry".into()));
     }
