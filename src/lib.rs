@@ -11,6 +11,7 @@
 pub mod api;
 pub mod checkpoint;
 pub mod error;
+pub mod import;
 pub mod shutdown;
 pub mod merkle;
 pub mod migration;

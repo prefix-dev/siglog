@@ -26,6 +26,10 @@ path = "src/main.rs"
 name = "witness"
 path = "src/bin/witness.rs"
 
+[[bin]]
+name = "siglog-import"
+path = "src/bin/import.rs"
+
 [dependencies]
 # Web framework
 axum = "0.8"

@@ -180,5 +180,12 @@ the replenish interval (`per_nanosecond(1e9 / rps)`); regression-tested.
   quorum 3.
 - Alerting: monitor violations → webhook/status page; log health: pending
   count growth, checkpoint age, witness cosign failure rate.
-- Bootstrap plan: mass-load existing repodata as epoch T₀; document that
-  tamper-evidence starts at T₀.
+- Bootstrap plan: **done** — `siglog-import` bulk-builds tree + tiles +
+  bundles + vindex + checkpoint in one pass (byte-identical to incremental
+  integration; measured 5,497 entries/s locally, 200k entries → 1,571
+  objects). `conda-log-ingest --jsonl-out` converts repodata to its input.
+  A `--epoch-note` marker entry records what the bootstrap represents.
+  Run as a one-off Fly machine holding the volume (runbook in README).
+  Ongoing sync after bootstrap: scheduled job (GitHub Actions cron is fine)
+  diffing repodata against the log and submitting deltas via `POST /add`;
+  the publish-time hook in channel infrastructure is the end state.

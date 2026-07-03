@@ -170,6 +170,11 @@ impl TileStorage {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Check whether an object exists at a path.
+    pub async fn exists(&self, path: &str) -> Result<bool> {
+        self.op.exists(path).await.map_err(Into::into)
+    }
 }
 
 /// Wrapper type for checkpoint data.
