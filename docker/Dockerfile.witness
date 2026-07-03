@@ -27,13 +27,17 @@ RUN apt-get update && apt-get install -y \
 # Copy binary from builder
 COPY --from=builder /app/target/release/witness /usr/local/bin/witness
 
-# Create data directory
-RUN mkdir -p /data
+# Run as a non-root user with a writable data directory
+RUN useradd --system --uid 10001 --create-home --home-dir /data witness \
+    && mkdir -p /data \
+    && chown -R witness:witness /data
+USER witness
 
 # Default environment variables
 ENV LISTEN_ADDR=0.0.0.0:8081
 ENV DATABASE_URL=sqlite:/data/witness.db?mode=rwc
 
+VOLUME /data
 EXPOSE 8081
 
 ENTRYPOINT ["witness"]

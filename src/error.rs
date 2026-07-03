@@ -73,7 +73,10 @@ impl IntoResponse for Error {
             }
             _ => {
                 tracing::error!("Error: {}", self);
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
             }
         };
 

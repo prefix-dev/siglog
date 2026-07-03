@@ -32,8 +32,11 @@ COPY --from=builder /app/target/release/siglog /usr/local/bin/siglog
 COPY --from=builder /app/target/release/witness /usr/local/bin/witness
 COPY --from=builder /app/target/release/conda-monitor /usr/local/bin/conda-monitor
 
-# Create data directories
-RUN mkdir -p /data
+# Run as a non-root user with a writable data directory
+RUN useradd --system --uid 10001 --create-home --home-dir /data app \
+    && mkdir -p /data \
+    && chown -R app:app /data
+USER app
 
 WORKDIR /data
 

@@ -23,14 +23,51 @@ pub struct ExternalWitness {
     pub name: String,
     /// URL of the witness service (e.g., "http://localhost:8081").
     pub url: String,
+    /// The witness's pinned verification key. Cosignatures returned by the
+    /// witness are verified against this key before they count toward the
+    /// publication quorum.
+    pub verifying_key: ed25519_dalek::VerifyingKey,
+    /// The expected key ID for plain note signatures (alg 0x01, legacy).
+    pub key_id: crate::checkpoint::signer::KeyId,
+    /// The expected key ID for cosignature/v1 signatures (alg 0x04, C2SP).
+    pub key_id_v1: crate::checkpoint::signer::KeyId,
 }
 
 impl ExternalWitness {
-    /// Create a new external witness configuration.
-    pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
+    /// Create a new external witness configuration from a note-format
+    /// verification key (`name+hash+base64(alg+pubkey)`).
+    ///
+    /// Both plain Ed25519 vkeys (alg 0x01) and cosignature/v1 vkeys
+    /// (alg 0x04) are accepted — the public key material is the same; the
+    /// expected key IDs for both signature formats are derived from it.
+    pub fn new(name: impl Into<String>, url: impl Into<String>, vkey: &str) -> Result<Self> {
+        use crate::checkpoint::signer::{compute_key_id_with_alg, ALG_COSIGNATURE_V1};
+
+        let name = name.into();
+        let (key_name, _alg, _key_id, verifying_key) = crate::witness::parse_vkey(vkey)?;
+        if key_name != name {
+            return Err(Error::Config(format!(
+                "witness key name '{}' does not match witness name '{}'",
+                key_name, name
+            )));
+        }
+        Ok(Self {
+            key_id: compute_key_id_with_alg(&name, &verifying_key, 0x01),
+            key_id_v1: compute_key_id_with_alg(&name, &verifying_key, ALG_COSIGNATURE_V1),
+            name,
             url: url.into(),
+            verifying_key,
+        })
+    }
+
+    /// Create a witness config directly from a signer's public key (tests).
+    pub fn from_signer(signer: &CheckpointSigner, url: impl Into<String>) -> Self {
+        Self {
+            name: signer.name().as_str().to_string(),
+            url: url.into(),
+            verifying_key: signer.public_key(),
+            key_id: signer.key_id().clone(),
+            key_id_v1: signer.cosignature_v1_key_id(),
         }
     }
 }
@@ -70,6 +107,9 @@ pub struct WorkerConfig {
     pub checkpoint_interval: Duration,
     /// Log origin string.
     pub origin: String,
+    /// Minimum number of external witness cosignatures required to publish
+    /// a checkpoint. `None` requires all configured external witnesses.
+    pub witness_quorum: Option<usize>,
 }
 
 impl Default for WorkerConfig {
@@ -79,6 +119,7 @@ impl Default for WorkerConfig {
             integration_batch_size: 1024,
             checkpoint_interval: Duration::from_secs(1),
             origin: "example.com/log".to_string(),
+            witness_quorum: None,
         }
     }
 }
@@ -189,17 +230,25 @@ async fn run_integration_cycle(
     // Write entry bundles
     write_entry_bundles(storage, &pending, state.integrated_size, result.new_size).await?;
 
-    // Index entries in vindex if enabled
+    // Index entries in vindex if enabled. This MUST succeed (including the
+    // WAL fsync) before entries are marked integrated: marking first would
+    // let the vindex silently diverge from the log, and a WAL that ends up
+    // behind the database is a fatal startup error. Failing here aborts the
+    // cycle; the retry re-fetches the same pending entries and index_entry
+    // skips anything already indexed.
     if let Some(vi) = vindex {
         for entry in &pending {
-            if let Err(e) = vi.index_entry(entry.index, entry.data.as_bytes()) {
-                tracing::warn!("Failed to index entry {}: {}", entry.index.value(), e);
-            }
+            vi.index_entry(entry.index, entry.data.as_bytes())
+                .map_err(|e| {
+                    Error::Internal(format!(
+                        "failed to index entry {} in vindex: {}",
+                        entry.index.value(),
+                        e
+                    ))
+                })?;
         }
-        // Flush vindex WAL periodically (if using WAL)
-        if let Err(e) = vi.flush() {
-            tracing::warn!("Failed to flush vindex WAL: {}", e);
-        }
+        vi.flush()
+            .map_err(|e| Error::Internal(format!("failed to flush vindex WAL: {}", e)))?;
         tracing::debug!(
             "Indexed {} entries in vindex, total keys: {}",
             pending.len(),
@@ -228,6 +277,18 @@ async fn run_integration_cycle(
         result.new_size.value(),
         result.root_hash.to_hex()
     );
+
+    // Compact the vindex WAL once enough entries have accumulated. Runs on a
+    // blocking thread: it serializes the whole index to disk.
+    if let Some(vi) = vindex {
+        let vi = Arc::clone(vi);
+        let compacted = tokio::task::spawn_blocking(move || vi.maybe_snapshot())
+            .await
+            .map_err(|e| Error::Internal(format!("vindex snapshot task panicked: {}", e)))??;
+        if compacted {
+            tracing::info!("Vindex snapshot written; WAL compacted");
+        }
+    }
 
     Ok(())
 }
@@ -312,7 +373,15 @@ pub async fn run_checkpoint_worker(
         external_witnesses.len()
     );
 
-    let origin = Origin::new(config.origin.clone()).expect("invalid log origin");
+    // main() validates the origin before spawning; this is a defensive check
+    // so a bad origin can never panic inside the spawned task.
+    let origin = match Origin::new(config.origin.clone()) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!("Checkpoint worker cannot start: invalid log origin: {}", e);
+            return;
+        }
+    };
     let client = reqwest::Client::new();
     let mut witness_state = ExternalWitnessState::default();
     let mut last_published = LastPublished::default();
@@ -326,7 +395,7 @@ pub async fn run_checkpoint_worker(
                 }
             }
             _ = tokio::time::sleep(config.checkpoint_interval) => {
-                if let Err(e) = publish_checkpoint(&db, &storage, &signer, &witnesses, &external_witnesses, &client, &origin, &mut witness_state, &mut last_published).await {
+                if let Err(e) = publish_checkpoint(&db, &storage, &signer, &witnesses, &external_witnesses, config.witness_quorum, &client, &origin, &mut witness_state, &mut last_published).await {
                     tracing::error!("Checkpoint publish error: {}", e);
                 }
             }
@@ -341,6 +410,7 @@ async fn publish_checkpoint(
     signer: &CheckpointSigner,
     witnesses: &[Arc<CheckpointSigner>],
     external_witnesses: &[ExternalWitness],
+    witness_quorum: Option<usize>,
     client: &reqwest::Client,
     origin: &Origin,
     witness_state: &mut ExternalWitnessState,
@@ -382,9 +452,13 @@ async fn publish_checkpoint(
     // Create cosigned checkpoint with the log's signature
     let mut cosigned = CosignedCheckpoint::new(checkpoint, signer);
 
-    // Add in-process witness signatures
+    // Add in-process witness cosignatures (cosignature/v1, like real witnesses)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| Error::Internal(format!("system clock error: {}", e)))?
+        .as_secs();
     for witness in witnesses {
-        cosigned.add_signature(witness);
+        cosigned.add_cosignature_v1(witness, now);
     }
 
     let mut external_signature_count = 0usize;
@@ -431,10 +505,10 @@ async fn publish_checkpoint(
         {
             Ok(signature_line) => {
                 if let Err(e) =
-                    add_external_signature_line(&mut cosigned, &ext_witness.name, &signature_line)
+                    add_external_signature_line(&mut cosigned, ext_witness, &signature_line)
                 {
                     tracing::warn!(
-                        "Failed to parse signature from external witness {}: {}",
+                        "Rejected signature from external witness {}: {}",
                         ext_witness.name,
                         e
                     );
@@ -454,12 +528,18 @@ async fn publish_checkpoint(
         }
     }
 
-    if external_signature_count < external_witnesses.len() {
+    // Publish once a quorum of external witnesses has cosigned. Requiring
+    // every witness would let a single unavailable witness halt the log.
+    let required = witness_quorum
+        .unwrap_or(external_witnesses.len())
+        .min(external_witnesses.len());
+    if external_signature_count < required {
         tracing::warn!(
-            "Not publishing checkpoint size {}: got {}/{} external witness signatures",
+            "Not publishing checkpoint size {}: got {}/{} external witness signatures (quorum {})",
             new_size,
             external_signature_count,
-            external_witnesses.len()
+            external_witnesses.len(),
+            required
         );
         return Ok(());
     }
@@ -486,15 +566,66 @@ async fn publish_checkpoint(
 
 fn add_external_signature_line(
     cosigned: &mut CosignedCheckpoint,
-    expected_name: &str,
+    witness: &ExternalWitness,
     line: &str,
 ) -> Result<()> {
+    use crate::checkpoint::signer::cosignature_v1_message;
+    use ed25519_dalek::Verifier;
+
     let sig = CheckpointSignature::from_line(line)?;
-    if sig.name.as_str() != expected_name {
+    if sig.name.as_str() != witness.name {
         return Err(Error::Config(format!(
             "witness name mismatch: expected '{}', got '{}'",
-            expected_name, sig.name
+            witness.name, sig.name
         )));
+    }
+
+    // Verify the cosignature against the pinned key. Without this, a
+    // compromised witness could return garbage that still counts toward the
+    // publication quorum. C2SP cosignature/v1 signatures (with timestamp)
+    // sign the timestamped message and use the alg-0x04 key ID; legacy plain
+    // signatures sign the bare body with the alg-0x01 key ID.
+    let body = cosigned.checkpoint.to_body();
+    match sig.timestamp {
+        Some(ts) => {
+            if sig.key_id != witness.key_id_v1 {
+                return Err(Error::Config(format!(
+                    "witness cosignature/v1 key ID mismatch for '{}': expected {:08x}, got {:08x}",
+                    witness.name,
+                    witness.key_id_v1.as_u32(),
+                    sig.key_id.as_u32()
+                )));
+            }
+            let message = cosignature_v1_message(ts, &body);
+            witness
+                .verifying_key
+                .verify(message.as_bytes(), &sig.signature)
+                .map_err(|e| {
+                    Error::Signing(format!(
+                        "cosignature/v1 from witness '{}' failed verification: {}",
+                        witness.name, e
+                    ))
+                })?;
+        }
+        None => {
+            if sig.key_id != witness.key_id {
+                return Err(Error::Config(format!(
+                    "witness key ID mismatch for '{}': expected {:08x}, got {:08x}",
+                    witness.name,
+                    witness.key_id.as_u32(),
+                    sig.key_id.as_u32()
+                )));
+            }
+            witness
+                .verifying_key
+                .verify(body.as_bytes(), &sig.signature)
+                .map_err(|e| {
+                    Error::Signing(format!(
+                        "cosignature from witness '{}' failed verification: {}",
+                        witness.name, e
+                    ))
+                })?;
+        }
     }
 
     if !cosigned.has_signature_from(&sig.name) {
@@ -601,13 +732,14 @@ mod tests {
         ])
     }
 
-    /// Create a signature line in the note format for testing.
+    /// Create a plain (legacy) signature line in the note format for testing.
     fn make_signature_line(signer: &CheckpointSigner, body: &str) -> String {
         let signature = signer.signing_key_ref().sign(body.as_bytes());
         let sig = CheckpointSignature {
             name: signer.name().clone(),
             key_id: signer.key_id().clone(),
             signature,
+            timestamp: None,
         };
         sig.to_line()
     }
@@ -642,7 +774,7 @@ mod tests {
 
         // Call the external witness
         let client = reqwest::Client::new();
-        let ext_witness = ExternalWitness::new("test-witness", mock_server.uri());
+        let ext_witness = ExternalWitness::from_signer(&witness_signer, mock_server.uri());
         let mut witness_state = ExternalWitnessState::default();
 
         let result =
@@ -650,7 +782,92 @@ mod tests {
                 .await;
 
         assert!(result.is_ok(), "Expected success, got: {:?}", result);
-        assert_eq!(result.unwrap(), sig_line);
+        let sig_line_returned = result.unwrap();
+        assert_eq!(sig_line_returned, sig_line);
+
+        // The signature must verify against the pinned key.
+        let mut cosigned = cosigned;
+        add_external_signature_line(&mut cosigned, &ext_witness, &sig_line_returned)
+            .expect("valid cosignature must be accepted");
+        assert_eq!(cosigned.signature_count(), 2);
+    }
+
+    #[test]
+    fn test_cosignature_v1_line_accepted() {
+        let witness_signer = test_signer("test-witness");
+        let log_signer = test_signer("test.log");
+
+        let checkpoint = Checkpoint::new(
+            Origin::new("test.log".to_string()).unwrap(),
+            TreeSize::new(10),
+            empty_root_hash(),
+        );
+        let mut cosigned = CosignedCheckpoint::new(checkpoint, &log_signer);
+
+        // A spec-conformant witness returns a timestamped cosignature/v1 line
+        // (76-byte blob, alg-0x04 key ID).
+        let cosig = witness_signer.cosign_v1(&cosigned.checkpoint, 1679315147);
+        let line = cosig.to_line();
+
+        let ext_witness = ExternalWitness::from_signer(&witness_signer, "http://unused");
+        add_external_signature_line(&mut cosigned, &ext_witness, &line)
+            .expect("valid cosignature/v1 must be accepted");
+        assert_eq!(cosigned.signature_count(), 2);
+
+        // The line must round-trip through the checkpoint text.
+        let text = cosigned.to_text();
+        let reparsed = CosignedCheckpoint::from_text(&text).unwrap();
+        assert_eq!(reparsed.signature_count(), 2);
+        let ws = reparsed
+            .signatures
+            .iter()
+            .find(|s| s.name.as_str() == "test-witness")
+            .unwrap();
+        assert_eq!(ws.timestamp, Some(1679315147));
+
+        // Tampering with the timestamp must break verification.
+        let mut tampered = cosig.clone();
+        tampered.timestamp = Some(1679315148);
+        let mut cosigned2 = CosignedCheckpoint::new(
+            Checkpoint::new(
+                Origin::new("test.log".to_string()).unwrap(),
+                TreeSize::new(10),
+                empty_root_hash(),
+            ),
+            &log_signer,
+        );
+        let result = add_external_signature_line(&mut cosigned2, &ext_witness, &tampered.to_line());
+        assert!(result.is_err(), "Altered timestamp must fail verification");
+    }
+
+    #[tokio::test]
+    async fn test_garbage_witness_signature_rejected() {
+        let witness_signer = test_signer("test-witness");
+        let other_signer = test_signer("test-witness"); // same name, different key
+        let log_signer = test_signer("test.log");
+
+        let checkpoint = Checkpoint::new(
+            Origin::new("test.log".to_string()).unwrap(),
+            TreeSize::new(10),
+            empty_root_hash(),
+        );
+        let mut cosigned = CosignedCheckpoint::new(checkpoint, &log_signer);
+
+        // A signature over the right body but from the WRONG key (e.g. a
+        // compromised witness) must be rejected by pinned-key verification.
+        let body = cosigned.checkpoint.to_body();
+        let forged_line = make_signature_line(&other_signer, &body);
+
+        let ext_witness = ExternalWitness::from_signer(&witness_signer, "http://unused");
+
+        let result = add_external_signature_line(&mut cosigned, &ext_witness, &forged_line);
+        assert!(result.is_err(), "Forged cosignature must be rejected");
+        assert_eq!(cosigned.signature_count(), 1, "Only the log signature remains");
+
+        // A signature from the right key over the WRONG body must also fail.
+        let wrong_body_line = make_signature_line(&witness_signer, "some other body\n");
+        let result = add_external_signature_line(&mut cosigned, &ext_witness, &wrong_body_line);
+        assert!(result.is_err(), "Signature over wrong body must be rejected");
     }
 
     #[tokio::test]
@@ -681,7 +898,8 @@ mod tests {
 
         // Call the external witness
         let client = reqwest::Client::new();
-        let ext_witness = ExternalWitness::new("test-witness", mock_server.uri());
+        let witness_signer = test_signer("test-witness");
+        let ext_witness = ExternalWitness::from_signer(&witness_signer, mock_server.uri());
         let mut witness_state = ExternalWitnessState::default();
 
         let result =
@@ -735,8 +953,8 @@ mod tests {
         let mut witness_state = ExternalWitnessState::default();
 
         let ext_witnesses = vec![
-            ExternalWitness::new("witness1", mock_witness1.uri()),
-            ExternalWitness::new("witness2", mock_witness2.uri()),
+            ExternalWitness::from_signer(&witness1_signer, mock_witness1.uri()),
+            ExternalWitness::from_signer(&witness2_signer, mock_witness2.uri()),
         ];
 
         // Simulate what publish_checkpoint does for external witnesses
@@ -816,9 +1034,10 @@ mod tests {
         let client = reqwest::Client::new();
         let mut witness_state = ExternalWitnessState::default();
 
+        let witness2_signer = test_signer("witness2");
         let ext_witnesses = vec![
-            ExternalWitness::new("witness1", mock_witness1.uri()),
-            ExternalWitness::new("witness2", mock_witness2.uri()),
+            ExternalWitness::from_signer(&witness1_signer, mock_witness1.uri()),
+            ExternalWitness::from_signer(&witness2_signer, mock_witness2.uri()),
         ];
 
         let mut success_count = 0;

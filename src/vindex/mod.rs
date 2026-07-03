@@ -15,15 +15,18 @@
 //! - PrefixTree: Merkle tree for verifiable proofs
 
 mod prefix_tree;
+mod snapshot;
 mod wal;
 
 use crate::error::{Error, Result};
 use crate::types::LogIndex;
 pub use prefix_tree::{LookupProof, PrefixTree, ProofNode};
 use sha2::{Digest, Sha256};
+pub use snapshot::snapshot_path;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 pub use wal::{
     validate_and_truncate_wal, BatchedBinaryWalWriter, BatchedWalWriter, BinaryWalWriter,
@@ -118,6 +121,9 @@ pub struct LookupResult {
     pub found: bool,
     /// The inclusion/exclusion proof from the prefix tree.
     pub proof: Vec<ProofNode>,
+    /// The prefix tree root hash the proof verifies against, captured under
+    /// the same lock as the proof so the pair is always consistent.
+    pub root_hash: IndexKey,
 }
 
 /// WAL writer variant (batched or unbatched).
@@ -140,6 +146,13 @@ impl WalWriterVariant {
             WalWriterVariant::Batched(w) => w.flush(),
         }
     }
+
+    fn truncate(&mut self) -> Result<()> {
+        match self {
+            WalWriterVariant::Unbatched(w) => w.truncate(),
+            WalWriterVariant::Batched(w) => w.truncate(),
+        }
+    }
 }
 
 /// The verifiable index maintains a mapping from keys to log indices.
@@ -148,6 +161,12 @@ pub struct VerifiableIndex {
     index: RwLock<HashMap<IndexKey, Vec<LogIndex>>>,
     /// WAL writer for persistence.
     wal_writer: Option<RwLock<WalWriterVariant>>,
+    /// Snapshot file path (when WAL persistence is enabled).
+    snapshot_file: Option<PathBuf>,
+    /// Entries indexed since the last snapshot (drives compaction).
+    entries_since_snapshot: AtomicU64,
+    /// Snapshot after this many new entries (0 = disabled).
+    snapshot_interval: u64,
     /// The map function for extracting keys.
     map_fn: Arc<dyn MapFn>,
     /// Current tree size (number of entries indexed).
@@ -170,12 +189,26 @@ impl VerifiableIndex {
     /// Maximum number of keys that can be represented for one entry in the WAL.
     const MAX_KEYS_PER_ENTRY: usize = u8::MAX as usize;
 
+    /// Default number of new entries between snapshots.
+    ///
+    /// Each snapshot durably captures the full index and truncates the WAL,
+    /// bounding WAL size and startup replay time.
+    const DEFAULT_SNAPSHOT_INTERVAL: u64 = 100_000;
+
     /// Read max_keys from environment or use default.
     fn get_max_keys() -> usize {
         std::env::var("VINDEX_MAX_KEYS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(Self::DEFAULT_MAX_KEYS)
+    }
+
+    /// Read the snapshot interval from the environment or use the default.
+    fn get_snapshot_interval() -> u64 {
+        std::env::var("VINDEX_SNAPSHOT_INTERVAL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(Self::DEFAULT_SNAPSHOT_INTERVAL)
     }
 
     /// Read max_indices_per_key from environment or use default.
@@ -209,6 +242,9 @@ impl VerifiableIndex {
         Self {
             index: RwLock::new(HashMap::new()),
             wal_writer: None,
+            snapshot_file: None,
+            entries_since_snapshot: AtomicU64::new(0),
+            snapshot_interval: 0,
             map_fn,
             tree_size: RwLock::new(0),
             prefix_tree: RwLock::new(PrefixTree::new()),
@@ -253,37 +289,69 @@ impl VerifiableIndex {
         batch_size: usize,
     ) -> Result<Self> {
         let wal_path = wal_path.as_ref();
+        let snapshot_file = snapshot::snapshot_path(wal_path);
+
+        // Load the last snapshot if present. An invalid snapshot is treated
+        // as absent (read_snapshot logs a warning); the coverage check below
+        // then fails and the caller can rebuild from log storage.
+        let (mut index, base_size) = match snapshot::read_snapshot(&snapshot_file) {
+            Some((size, idx)) => {
+                tracing::info!(
+                    "Vindex snapshot loaded: tree_size={}, {} keys",
+                    size,
+                    idx.len()
+                );
+                (idx, size)
+            }
+            None => (HashMap::new(), 0),
+        };
+
+        if base_size > expected_tree_size {
+            return Err(Error::Internal(format!(
+                "vindex snapshot is ahead of database state: snapshot tree_size={}, database \
+                 integrated_size={}. Rebuild the vindex before enabling it.",
+                base_size, expected_tree_size
+            )));
+        }
 
         // Validate and truncate WAL to match expected tree size
         // This is critical for crash recovery: if the WAL was flushed but the database
         // wasn't updated before a crash, we truncate the WAL to avoid duplicates
         let actual_wal_size = validate_and_truncate_wal(wal_path, expected_tree_size)?;
         tracing::info!(
-            "WAL validated: expected_tree_size={}, actual_wal_size={}",
+            "WAL validated: expected_tree_size={}, snapshot_size={}, actual_wal_size={}",
             expected_tree_size,
+            base_size,
             actual_wal_size
         );
 
-        if actual_wal_size < expected_tree_size {
+        let covered = base_size.max(actual_wal_size);
+        if covered < expected_tree_size {
             return Err(Error::Internal(format!(
-                "vindex WAL is behind database state: WAL tree_size={}, database integrated_size={}. \
-                 Rebuild the vindex before enabling it.",
-                actual_wal_size, expected_tree_size
+                "vindex state is behind the database: snapshot+WAL cover tree_size={}, database \
+                 integrated_size={}. Rebuild the vindex before enabling it.",
+                covered, expected_tree_size
             )));
         }
 
-        // Create or open WAL
-        let mut tree_size = 0u64;
-        let mut index: HashMap<IndexKey, Vec<LogIndex>> = HashMap::new();
+        let mut tree_size = base_size;
         let mut prefix_tree = PrefixTree::new();
 
-        // Track seen (idx, key) pairs to prevent duplicates (defense in depth)
+        // Track seen (idx, key) pairs to prevent duplicates (defense in depth).
+        // Only WAL entries after the snapshot are replayed, so this set is
+        // bounded by the snapshot interval, not the full history.
         let mut seen: HashSet<(u64, IndexKey)> = HashSet::new();
 
-        // Replay existing WAL if it exists
+        // Replay WAL entries on top of the snapshot
         if wal_path.exists() {
             let mut reader = WalReader::open(wal_path)?;
             while let Some((idx, keys)) = reader.next_entry()? {
+                // Entries at or below the snapshot's tree size are already in
+                // the snapshot (e.g. after a crash between snapshot write and
+                // WAL truncation).
+                if idx.value() < base_size {
+                    continue;
+                }
                 for key in keys {
                     // Deduplicate: only add if we haven't seen this (idx, key) pair
                     if seen.insert((idx.value(), key)) {
@@ -292,19 +360,19 @@ impl VerifiableIndex {
                 }
                 tree_size = tree_size.max(idx.value() + 1);
             }
-
-            // Rebuild prefix tree from index
-            for (key, indices) in &index {
-                let value_hash = compute_value_hash(indices);
-                prefix_tree.insert(key, value_hash);
-            }
-
-            tracing::info!(
-                "WAL replayed: {} unique keys, tree_size={}",
-                index.len(),
-                tree_size
-            );
         }
+
+        // Rebuild prefix tree from the combined index
+        for (key, indices) in &index {
+            let value_hash = compute_value_hash(indices);
+            prefix_tree.insert(key, value_hash);
+        }
+
+        tracing::info!(
+            "Vindex restored: {} unique keys, tree_size={}",
+            index.len(),
+            tree_size
+        );
 
         // Create writer (batched or unbatched based on batch_size)
         let wal_writer = if batch_size > 1 {
@@ -316,16 +384,23 @@ impl VerifiableIndex {
 
         let max_keys = Self::get_max_keys();
         let max_indices_per_key = Self::get_max_indices_per_key();
+        let snapshot_interval = Self::get_snapshot_interval();
 
         tracing::info!(
-            "VerifiableIndex limits: max_keys={}, max_indices_per_key={}",
+            "VerifiableIndex limits: max_keys={}, max_indices_per_key={}, snapshot_interval={}",
             max_keys,
-            max_indices_per_key
+            max_indices_per_key,
+            snapshot_interval
         );
 
         Ok(Self {
             index: RwLock::new(index),
             wal_writer: Some(RwLock::new(wal_writer)),
+            snapshot_file: Some(snapshot_file),
+            // WAL bytes not yet covered by a snapshot count toward the next
+            // snapshot trigger.
+            entries_since_snapshot: AtomicU64::new(tree_size - base_size),
+            snapshot_interval,
             map_fn,
             tree_size: RwLock::new(tree_size),
             prefix_tree: RwLock::new(prefix_tree),
@@ -337,7 +412,15 @@ impl VerifiableIndex {
     /// Index a new entry at the given log index.
     ///
     /// Extracts keys from the entry data and adds them to the index.
+    ///
+    /// Idempotent: entries below the current tree size were already indexed
+    /// and are skipped, so a retried integration cycle (e.g. after a
+    /// transient database error) cannot duplicate indices.
     pub fn index_entry(&self, idx: LogIndex, data: &[u8]) -> Result<()> {
+        if idx.value() < *self.tree_size.read().unwrap() {
+            return Ok(());
+        }
+
         let keys = self.map_fn.map(data);
 
         if keys.len() > Self::MAX_KEYS_PER_ENTRY {
@@ -356,8 +439,11 @@ impl VerifiableIndex {
             }
 
             // Still need to update tree size even if no keys
-            let mut tree_size = self.tree_size.write().unwrap();
-            *tree_size = (*tree_size).max(idx.value() + 1);
+            {
+                let mut tree_size = self.tree_size.write().unwrap();
+                *tree_size = (*tree_size).max(idx.value() + 1);
+            }
+            self.entries_since_snapshot.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
 
@@ -419,6 +505,11 @@ impl VerifiableIndex {
 
             for key in &keys {
                 let indices = index.entry(*key).or_default();
+                // Defense in depth: never record the same index twice for a
+                // key (mirrors the dedup applied during WAL replay).
+                if indices.contains(&idx) {
+                    continue;
+                }
                 indices.push(idx);
 
                 // Update the prefix tree with the new value hash
@@ -432,6 +523,7 @@ impl VerifiableIndex {
             let mut tree_size = self.tree_size.write().unwrap();
             *tree_size = (*tree_size).max(idx.value() + 1);
         }
+        self.entries_since_snapshot.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -444,12 +536,14 @@ impl VerifiableIndex {
 
         let indices = index.get(key).cloned().unwrap_or_default();
         let lookup_proof = prefix_tree.lookup(key);
+        let root_hash = prefix_tree.root_hash();
 
         LookupResult {
             indices,
             tree_size,
             found: lookup_proof.found,
             proof: lookup_proof.proof,
+            root_hash,
         }
     }
 
@@ -477,6 +571,115 @@ impl VerifiableIndex {
             wal.write().unwrap().flush()?;
         }
         Ok(())
+    }
+
+    /// Write a snapshot of the full index and truncate the WAL.
+    ///
+    /// This bounds WAL growth and startup replay time. The WAL writer lock
+    /// is held for the whole operation so no entry can be appended between
+    /// the snapshot capture and the WAL truncation (such an entry would be
+    /// lost by the truncate).
+    pub fn snapshot(&self) -> Result<()> {
+        let (Some(wal), Some(snapshot_file)) = (&self.wal_writer, &self.snapshot_file) else {
+            return Ok(());
+        };
+
+        let mut wal = wal.write().unwrap();
+        wal.flush()?;
+
+        {
+            let index = self.index.read().unwrap();
+            let tree_size = *self.tree_size.read().unwrap();
+            snapshot::write_snapshot(snapshot_file, tree_size, &index)?;
+            tracing::info!(
+                "Vindex snapshot written: tree_size={}, {} keys",
+                tree_size,
+                index.len()
+            );
+        }
+
+        wal.truncate()?;
+        self.entries_since_snapshot.store(0, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Snapshot and compact the WAL if enough entries accumulated since the
+    /// last snapshot. Returns whether a snapshot was written.
+    pub fn maybe_snapshot(&self) -> Result<bool> {
+        if self.snapshot_interval == 0 || self.wal_writer.is_none() {
+            return Ok(false);
+        }
+        if self.entries_since_snapshot.load(Ordering::Relaxed) < self.snapshot_interval {
+            return Ok(false);
+        }
+        self.snapshot()?;
+        Ok(true)
+    }
+
+    /// Rebuild the index from the log's entry bundles in tile storage.
+    ///
+    /// Used when the on-disk vindex state (snapshot + WAL) is missing,
+    /// corrupted, or behind the database. The log itself is the source of
+    /// truth: every integrated entry lives in an entry bundle, so the index
+    /// can always be reconstructed. Writes a fresh WAL and snapshot.
+    pub async fn rebuild_from_storage(
+        map_fn: Arc<dyn MapFn>,
+        wal_path: impl AsRef<Path>,
+        expected_tree_size: u64,
+        storage: &crate::storage::TileStorage,
+    ) -> Result<Self> {
+        use crate::api::paths::{partial_tile_size, ENTRY_BUNDLE_WIDTH};
+        use crate::types::{PartialSize, TileIndex};
+
+        let wal_path = wal_path.as_ref();
+
+        // Start from a clean slate.
+        let snapshot_file = snapshot::snapshot_path(wal_path);
+        let _ = std::fs::remove_file(&snapshot_file);
+        let _ = std::fs::remove_file(wal_path);
+
+        let vi = Self::with_wal(map_fn, wal_path, 0)?;
+        if expected_tree_size == 0 {
+            return Ok(vi);
+        }
+
+        tracing::info!(
+            "Rebuilding vindex from log storage ({} entries)...",
+            expected_tree_size
+        );
+
+        let last_bundle = (expected_tree_size - 1) / ENTRY_BUNDLE_WIDTH;
+        for bundle_idx in 0..=last_bundle {
+            let partial = partial_tile_size(0, bundle_idx, expected_tree_size);
+            let bundle = storage
+                .read_entry_bundle(TileIndex::new(bundle_idx), PartialSize::new(partial))
+                .await?
+                .ok_or_else(|| {
+                    Error::Internal(format!(
+                        "missing entry bundle {} during vindex rebuild",
+                        bundle_idx
+                    ))
+                })?;
+
+            for (offset, data) in bundle.entries.iter().enumerate() {
+                let idx = bundle_idx * ENTRY_BUNDLE_WIDTH + offset as u64;
+                if idx >= expected_tree_size {
+                    break;
+                }
+                vi.index_entry(LogIndex::new(idx), data.as_bytes())?;
+            }
+        }
+
+        vi.flush()?;
+        vi.snapshot()?;
+
+        tracing::info!(
+            "Vindex rebuilt: {} keys from {} entries",
+            vi.key_count(),
+            vi.tree_size()
+        );
+
+        Ok(vi)
     }
 
     /// Get the root hash of the prefix tree.
@@ -702,6 +905,134 @@ mod tests {
         let result = VerifiableIndex::with_wal(map_fn, path, 1);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_snapshot_compacts_wal_and_restores() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("vindex.wal");
+
+        let root_before;
+        {
+            let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+            let index = VerifiableIndex::with_wal(map_fn, &path, 0).unwrap();
+            index
+                .index_entry(LogIndex::new(0), br#"{"name": "foo"}"#)
+                .unwrap();
+            index
+                .index_entry(LogIndex::new(1), br#"{"name": "bar"}"#)
+                .unwrap();
+            index.flush().unwrap();
+
+            // Snapshot and compact.
+            index.snapshot().unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), 0, "WAL truncated");
+
+            // More entries after the snapshot land in the WAL only.
+            index
+                .index_entry(LogIndex::new(2), br#"{"name": "foo"}"#)
+                .unwrap();
+            index.flush().unwrap();
+            assert!(std::fs::metadata(&path).unwrap().len() > 0);
+
+            root_before = index.root_hash();
+        }
+
+        // Restart: state must be identical (snapshot + WAL replay).
+        let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+        let index = VerifiableIndex::with_wal(map_fn, &path, 3).unwrap();
+        assert_eq!(index.tree_size(), 3);
+        assert_eq!(index.key_count(), 2);
+        assert_eq!(index.root_hash(), root_before);
+
+        let result = index.lookup_string("foo");
+        assert_eq!(
+            result.indices.iter().map(|i| i.value()).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+    }
+
+    #[test]
+    fn test_crash_between_snapshot_and_truncate() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("vindex.wal");
+
+        let root_before;
+        {
+            let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+            let index = VerifiableIndex::with_wal(map_fn, &path, 0).unwrap();
+            index
+                .index_entry(LogIndex::new(0), br#"{"name": "foo"}"#)
+                .unwrap();
+            index
+                .index_entry(LogIndex::new(1), br#"{"name": "bar"}"#)
+                .unwrap();
+            index.flush().unwrap();
+            root_before = index.root_hash();
+
+            // Simulate a crash between snapshot write and WAL truncation:
+            // write the snapshot directly, leaving the full WAL in place.
+            let idx_map = index.index.read().unwrap().clone();
+            snapshot::write_snapshot(&snapshot::snapshot_path(&path), 2, &idx_map).unwrap();
+        }
+        assert!(std::fs::metadata(&path).unwrap().len() > 0, "WAL not truncated");
+
+        // Restart: pre-snapshot WAL entries must not be double-applied.
+        let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+        let index = VerifiableIndex::with_wal(map_fn, &path, 2).unwrap();
+        assert_eq!(index.tree_size(), 2);
+        assert_eq!(index.key_count(), 2);
+        assert_eq!(index.root_hash(), root_before);
+        assert_eq!(index.lookup_string("foo").indices.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_from_storage() {
+        use crate::merkle::EntryBundle;
+        use crate::storage::TileStorage;
+        use crate::types::{EntryData, PartialSize, TileIndex};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("vindex.wal");
+
+        // Log storage with one partial entry bundle of 3 entries.
+        let storage = TileStorage::new(
+            opendal::Operator::new(opendal::services::Memory::default())
+                .unwrap()
+                .finish(),
+        );
+        let entries = vec![
+            EntryData::from(r#"{"name": "foo"}"#),
+            EntryData::from(r#"{"name": "bar"}"#),
+            EntryData::from(r#"{"name": "foo"}"#),
+        ];
+        storage
+            .write_entry_bundle(
+                TileIndex::new(0),
+                PartialSize::new(3),
+                &EntryBundle::with_entries(entries),
+            )
+            .await
+            .unwrap();
+
+        // No WAL/snapshot exists: rebuild from storage.
+        let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+        let index = VerifiableIndex::rebuild_from_storage(map_fn, &path, 3, &storage)
+            .await
+            .unwrap();
+
+        assert_eq!(index.tree_size(), 3);
+        assert_eq!(index.key_count(), 2);
+        let result = index.lookup_string("foo");
+        assert_eq!(
+            result.indices.iter().map(|i| i.value()).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+
+        // The rebuild persisted a snapshot: a plain restart must now work.
+        let map_fn = Arc::new(JsonKeysMapFn::new("name"));
+        let restored = VerifiableIndex::with_wal(map_fn, &path, 3).unwrap();
+        assert_eq!(restored.root_hash(), index.root_hash());
     }
 
     #[test]

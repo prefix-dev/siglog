@@ -84,12 +84,18 @@ cargo build --release
 | `S3_REGION` | S3 region | `auto` |
 | `API_KEY` | Bearer token required for `/add` writes | Required unless `ALLOW_PUBLIC_WRITES=true` |
 | `ALLOW_PUBLIC_WRITES` | Allow unauthenticated `/add` writes for local development | `false` |
+| `EXTERNAL_WITNESSES` | External witnesses to collect cosignatures from, comma-separated. Format: `name=url=vkey` — the note-format verification key is required and cosignatures are verified against it before a checkpoint is published | - |
+| `WITNESS_QUORUM` | Minimum number of external witness cosignatures required to publish a checkpoint | All configured witnesses |
+| `WITNESS_KEYS` | In-process witness private keys for local development (comma-separated) | - |
+| `VINDEX_SNAPSHOT_INTERVAL` | Entries between vindex snapshots. Each snapshot persists the full index and truncates the WAL, bounding WAL growth and startup replay time (0 disables) | `100000` |
+| `RATE_LIMIT_PER_SECOND` | Requests per second allowed per client IP | `100` |
+| `RATE_LIMIT_BURST_SIZE` | Burst capacity per client IP | `200` |
 | `CHECKPOINT_INTERVAL` | Checkpoint frequency (seconds) | `1` |
 | `BATCH_MAX_SIZE` | Max entries per batch | `256` |
 | `BATCH_MAX_AGE_MS` | Max batch age (ms) | `1000` |
 | `VINDEX_ENABLED` | Enable verifiable index | `false` |
 | `VINDEX_KEY_FIELD` | JSON field for key extraction | `name` |
-| `VINDEX_WAL_PATH` | WAL path for persistent vindex recovery | Required when enabling vindex on a non-empty log |
+| `VINDEX_WAL_PATH` | WAL path for persistent vindex state (snapshot is stored alongside as `<path>.snapshot`). If the on-disk state is missing, corrupted, or behind the database, the vindex is automatically rebuilt from the log's entry bundles | Recommended when enabling vindex |
 
 #### Witness Server (`witness`)
 
@@ -206,16 +212,18 @@ A witness independently verifies and co-signs transparency log checkpoints. Runn
 
 #### POST /add-checkpoint
 
-Request body:
-```json
-{
-  "checkpoint": "log.example.com\n123\nROOTHASH...\n\n- log.example.com SIGNATURE...",
-  "proof": ["HASH1...", "HASH2..."],
-  "old_size": 100
-}
+Request body (text/plain, per [c2sp.org/tlog-witness](https://c2sp.org/tlog-witness)):
+```text
+old <size>
+<base64 consistency proof hash>
+...
+
+<checkpoint text with log signature>
 ```
 
-Response (on success): The witness's cosignature line.
+Response (on success): the witness's [cosignature/v1](https://c2sp.org/tlog-cosignature)
+line — a timestamped Ed25519 signature whose key ID is computed with the
+cosignature/v1 algorithm byte (0x04).
 
 ## API Reference
 

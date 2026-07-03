@@ -2,7 +2,14 @@
 #
 # Setup:
 #   Create a .env file with LOG_PRIVATE_KEY, LOG_PUBLIC_KEY,
-#   WITNESS_PRIVATE_KEY, and MONITOR_PRIVATE_KEY.
+#   WITNESS_PRIVATE_KEY, WITNESS_PUBLIC_KEY, MONITOR_PRIVATE_KEY,
+#   and MONITOR_PUBLIC_KEY.
+#
+#   Generate the witness key with name "local.dev/witness" and the monitor
+#   key with name "local.dev/monitor" (see README "Key Format"): the name
+#   embedded in each key must match the witness name configured in
+#   EXTERNAL_WITNESSES below, and the public keys are pinned so the log can
+#   verify cosignatures.
 #
 # Usage:
 #   docker compose -f docker/docker-compose.yml build
@@ -31,7 +38,6 @@ services:
       - --storage-backend=fs
       - --fs-root=/data/tiles
       - --origin=local.dev/log
-      - --private-key=${LOG_PRIVATE_KEY}
       - --listen=0.0.0.0:8080
       - --checkpoint-interval=1
       - --batch-max-size=256
@@ -39,9 +45,12 @@ services:
       - --allow-public-writes
       - --vindex-enabled
       - --vindex-key-field=name
-      - --external-witnesses=witness=http://witness:8080,monitor=http://monitor:8080
+      - --vindex-wal-path=/data/vindex.wal
     environment:
       RUST_LOG: info,siglog=debug
+      # Secrets via environment, not argv (argv is visible in docker inspect / ps)
+      LOG_PRIVATE_KEY: ${LOG_PRIVATE_KEY}
+      EXTERNAL_WITNESSES: "local.dev/witness=http://witness:8080=${WITNESS_PUBLIC_KEY},local.dev/monitor=http://monitor:8080=${MONITOR_PUBLIC_KEY}"
     ports:
       - "8080:8080"
     volumes:
@@ -60,11 +69,11 @@ services:
     command:
       - witness
       - --database-url=sqlite:/data/witness.db?mode=rwc
-      - --private-key=${WITNESS_PRIVATE_KEY}
       - --listen=0.0.0.0:8080
       - --log=local.dev/log=${LOG_PUBLIC_KEY}
     environment:
       RUST_LOG: info,witness=debug,siglog=debug
+      WITNESS_PRIVATE_KEY: ${WITNESS_PRIVATE_KEY}
     ports:
       - "8081:8080"
     volumes:
@@ -112,11 +121,12 @@ services:
     command:
       - conda-monitor
       - --database-url=sqlite:/data/monitor.db?mode=rwc
-      - --private-key=${MONITOR_PRIVATE_KEY}
       - --listen=0.0.0.0:8080
       - --log=local.dev/log=${LOG_PUBLIC_KEY}=http://log:8080
     environment:
       RUST_LOG: info,conda_monitor=debug,siglog=debug
+      # conda-monitor reads its signing key from WITNESS_PRIVATE_KEY
+      WITNESS_PRIVATE_KEY: ${MONITOR_PRIVATE_KEY}
     ports:
       - "8082:8080"
     volumes:

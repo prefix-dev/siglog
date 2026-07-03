@@ -28,6 +28,18 @@ pub struct CheckpointSigner {
 /// Ed25519 algorithm identifier for note format.
 const ALG_ED25519: u8 = 0x01;
 
+/// Ed25519 cosignature/v1 algorithm identifier (c2sp.org/tlog-cosignature).
+pub const ALG_COSIGNATURE_V1: u8 = 0x04;
+
+/// Build the message signed by an Ed25519 cosignature/v1 cosigner.
+///
+/// Per c2sp.org/tlog-cosignature: a `cosignature/v1` header line, a
+/// `time <posix seconds>` line, then the whole note body of the checkpoint
+/// (including its final newline).
+pub fn cosignature_v1_message(timestamp: u64, body: &str) -> String {
+    format!("cosignature/v1\ntime {}\n{}", timestamp, body)
+}
+
 impl CheckpointSigner {
     /// Create a new checkpoint signer from a note-format private key.
     ///
@@ -175,15 +187,50 @@ impl CheckpointSigner {
             signature,
         }
     }
+
+    /// The key ID this signer uses for cosignature/v1 cosignatures.
+    ///
+    /// Computed with the cosignature/v1 algorithm byte (0x04), so it differs
+    /// from the plain note-signature key ID.
+    pub fn cosignature_v1_key_id(&self) -> KeyId {
+        compute_key_id_with_alg(
+            self.name.as_str(),
+            &self.signing_key.verifying_key(),
+            ALG_COSIGNATURE_V1,
+        )
+    }
+
+    /// Produce a C2SP cosignature/v1 cosignature over a checkpoint.
+    ///
+    /// `timestamp` is the POSIX time (seconds) at which the cosignature is
+    /// generated; it is bound into the signed message and encoded in the
+    /// signature blob.
+    pub fn cosign_v1(&self, checkpoint: &Checkpoint, timestamp: u64) -> CheckpointSignature {
+        let message = cosignature_v1_message(timestamp, &checkpoint.to_body());
+        let signature = self.signing_key.sign(message.as_bytes());
+
+        CheckpointSignature {
+            name: self.name.clone(),
+            key_id: self.cosignature_v1_key_id(),
+            signature,
+            timestamp: Some(timestamp),
+        }
+    }
 }
 
 /// Compute the key ID for a verifying key per Go's note format.
 /// Hash = SHA256(name + "\n" + alg_byte + public_key)[:4]
 fn compute_key_id(name: &str, key: &VerifyingKey) -> KeyId {
+    compute_key_id_with_alg(name, key, ALG_ED25519)
+}
+
+/// Compute a key ID with an explicit algorithm byte.
+/// Hash = SHA256(name + "\n" + alg_byte + public_key)[:4]
+pub fn compute_key_id_with_alg(name: &str, key: &VerifyingKey, alg: u8) -> KeyId {
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
     hasher.update(b"\n");
-    hasher.update([ALG_ED25519]); // Ed25519 algorithm identifier
+    hasher.update([alg]);
     hasher.update(key.as_bytes());
     let hash = hasher.finalize();
 
@@ -313,19 +360,35 @@ pub struct CheckpointSignature {
     pub key_id: KeyId,
     /// The signature.
     pub signature: Signature,
+    /// The POSIX timestamp for cosignature/v1 signatures.
+    ///
+    /// `None` for plain note signatures (e.g. the log's own signature);
+    /// `Some` for C2SP cosignature/v1 witness cosignatures, where the
+    /// timestamp is bound into the signed message.
+    pub timestamp: Option<u64>,
 }
 
 impl CheckpointSignature {
     /// Format as a signature line.
+    ///
+    /// Plain signatures encode `key_id(4) || sig(64)`; cosignature/v1
+    /// signatures encode `key_id(4) || timestamp(8, BE) || sig(64)` per
+    /// c2sp.org/tlog-cosignature.
     pub fn to_line(&self) -> String {
-        let mut sig_data = Vec::with_capacity(4 + 64);
+        let mut sig_data = Vec::with_capacity(4 + 8 + 64);
         sig_data.extend_from_slice(self.key_id.as_bytes());
+        if let Some(ts) = self.timestamp {
+            sig_data.extend_from_slice(&ts.to_be_bytes());
+        }
         sig_data.extend_from_slice(&self.signature.to_bytes());
 
         format!("— {} {}", self.name.as_str(), STANDARD.encode(&sig_data))
     }
 
     /// Parse a signature line.
+    ///
+    /// Accepts both plain note signatures (68-byte blob) and cosignature/v1
+    /// signatures (76-byte blob with an embedded big-endian timestamp).
     pub fn from_line(line: &str) -> Result<Self> {
         let line = line.trim();
         if !line.starts_with("— ") {
@@ -343,16 +406,25 @@ impl CheckpointSignature {
             .decode(parts[1])
             .map_err(|e| Error::Config(format!("invalid signature base64: {}", e)))?;
 
-        if sig_data.len() != 68 {
-            return Err(Error::Config(format!(
-                "invalid signature length: expected 68, got {}",
-                sig_data.len()
-            )));
-        }
+        let (timestamp, sig_bytes): (Option<u64>, &[u8]) = match sig_data.len() {
+            68 => (None, &sig_data[4..]),
+            76 => {
+                let ts_bytes: [u8; 8] = sig_data[4..12]
+                    .try_into()
+                    .map_err(|_| Error::Config("invalid timestamp bytes".into()))?;
+                (Some(u64::from_be_bytes(ts_bytes)), &sig_data[12..])
+            }
+            n => {
+                return Err(Error::Config(format!(
+                    "invalid signature length: expected 68 (plain) or 76 (cosignature/v1), got {}",
+                    n
+                )));
+            }
+        };
 
         let key_id = KeyId::new([sig_data[0], sig_data[1], sig_data[2], sig_data[3]]);
         let signature = Signature::from_bytes(
-            sig_data[4..]
+            sig_bytes
                 .try_into()
                 .map_err(|_| Error::Config("invalid signature bytes".into()))?,
         );
@@ -361,6 +433,7 @@ impl CheckpointSignature {
             name,
             key_id,
             signature,
+            timestamp,
         })
     }
 }
@@ -404,6 +477,7 @@ impl SignedCheckpoint {
                 name: self.signer_name,
                 key_id: self.key_id,
                 signature: self.signature,
+                timestamp: None,
             }],
         }
     }
@@ -430,11 +504,12 @@ impl CosignedCheckpoint {
                 name: signer.name.clone(),
                 key_id: signer.key_id.clone(),
                 signature,
+                timestamp: None,
             }],
         }
     }
 
-    /// Add a cosignature from a witness.
+    /// Add a plain note cosignature from a witness (non-spec, legacy).
     pub fn add_signature(&mut self, signer: &CheckpointSigner) {
         let body = self.checkpoint.to_body();
         let signature = signer.signing_key.sign(body.as_bytes());
@@ -443,7 +518,14 @@ impl CosignedCheckpoint {
             name: signer.name.clone(),
             key_id: signer.key_id.clone(),
             signature,
+            timestamp: None,
         });
+    }
+
+    /// Add a C2SP cosignature/v1 cosignature from a witness signer.
+    pub fn add_cosignature_v1(&mut self, signer: &CheckpointSigner, timestamp: u64) {
+        let cosig = signer.cosign_v1(&self.checkpoint, timestamp);
+        self.signatures.push(cosig);
     }
 
     /// Parse a cosigned checkpoint from text.
@@ -651,6 +733,56 @@ mod tests {
         // Merging again should not duplicate
         cosigned1.merge_signatures(&cosigned2);
         assert_eq!(cosigned1.signature_count(), 3);
+    }
+
+    #[test]
+    fn test_parse_spec_example_cosignature_line() {
+        // Example cosignature line from c2sp.org/tlog-cosignature. The blob
+        // is keyid(4) || timestamp(8, BE) || sig(64); the spec's message
+        // example uses "time 1679315147".
+        let line = "— witness.example.com/w1 jWbPPwAAAABkGFDLEZMHwSRaJNiIDoe9DYn/zXcrtPHeolMI5OWXEhZCB9dlrDJsX3b2oyin1nPZqhf5nNo0xUe+mbIUBkBIfZ+qnA==";
+        let sig = CheckpointSignature::from_line(line).unwrap();
+        assert_eq!(sig.name.as_str(), "witness.example.com/w1");
+        assert_eq!(sig.timestamp, Some(1679315147));
+        assert_eq!(sig.key_id.as_bytes(), &[0x8d, 0x66, 0xcf, 0x3f]);
+        // Round-trip back to the identical line.
+        assert_eq!(sig.to_line(), line);
+    }
+
+    #[test]
+    fn test_cosignature_v1_message_format() {
+        // Exact message layout from the spec.
+        let body = "example.com/behind-the-sofa\n20852163\nCsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=\n";
+        let msg = cosignature_v1_message(1679315147, body);
+        assert_eq!(
+            msg,
+            "cosignature/v1\ntime 1679315147\nexample.com/behind-the-sofa\n20852163\nCsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=\n"
+        );
+    }
+
+    #[test]
+    fn test_cosign_v1_roundtrip_verifies() {
+        use ed25519_dalek::Verifier;
+
+        let signer = CheckpointSigner::generate("witness.example.com");
+        let checkpoint = Checkpoint::new(
+            Origin::new("example.com/log".to_string()).unwrap(),
+            TreeSize::new(42),
+            Sha256Hash::from_bytes([7u8; 32]),
+        );
+
+        let cosig = signer.cosign_v1(&checkpoint, 1679315147);
+        assert_eq!(cosig.timestamp, Some(1679315147));
+        assert_eq!(cosig.key_id, signer.cosignature_v1_key_id());
+        // The v1 key ID must differ from the plain note key ID.
+        assert_ne!(&cosig.key_id, signer.key_id());
+
+        let parsed = CheckpointSignature::from_line(&cosig.to_line()).unwrap();
+        let msg = cosignature_v1_message(1679315147, &checkpoint.to_body());
+        signer
+            .public_key()
+            .verify(msg.as_bytes(), &parsed.signature)
+            .expect("cosignature/v1 must verify over the timestamped message");
     }
 
     #[test]

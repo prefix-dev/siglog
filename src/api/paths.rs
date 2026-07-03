@@ -77,7 +77,13 @@ pub fn entries_path_for_log_index(seq: u64, log_size: u64) -> String {
 /// Calculate the expected number of leaves in a tile at the given level and index
 /// within a tree of the specified size, or 0 if the tile is fully populated.
 pub fn partial_tile_size(level: u64, index: u64, log_size: u64) -> u8 {
-    let size_at_level = log_size >> (level * TILE_HEIGHT);
+    // A shift of >= 64 bits is undefined; levels that high can never have
+    // partial tiles for any representable tree size.
+    let shift = level.saturating_mul(TILE_HEIGHT);
+    if shift >= 64 {
+        return 0;
+    }
+    let size_at_level = log_size >> shift;
     let full_tiles = size_at_level / TILE_WIDTH;
 
     if index < full_tiles {
@@ -91,6 +97,11 @@ pub fn partial_tile_size(level: u64, index: u64, log_size: u64) -> u8 {
 ///
 /// Validates that level is between 0 and 63.
 pub fn parse_tile_level(level: &str) -> Result<u64> {
+    // Strict digits only: u64::parse also accepts a leading '+', which would
+    // create alias URLs for the same immutable tile (CDN cache ambiguity).
+    if level.is_empty() || !level.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Error::InvalidPath("invalid tile level".into()));
+    }
     let l: u64 = level
         .parse()
         .map_err(|_| Error::InvalidPath("invalid tile level".into()))?;
@@ -113,6 +124,9 @@ pub fn parse_tile_level(level: &str) -> Result<u64> {
 pub fn parse_tile_index(index_str: &str) -> Result<(u64, u8)> {
     let (index_part, partial) = if let Some(pos) = index_str.find(".p/") {
         let partial_str = &index_str[pos + 3..];
+        if partial_str.is_empty() || !partial_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::InvalidPath("invalid partial size".into()));
+        }
         let partial: u64 = partial_str
             .parse()
             .map_err(|_| Error::InvalidPath("invalid partial size".into()))?;
@@ -146,7 +160,7 @@ pub fn parse_tile_index(index_str: &str) -> Result<(u64, u8)> {
     for part in parts {
         let digits = part.strip_prefix('x').unwrap_or(part);
 
-        if digits.len() != 3 {
+        if digits.len() != 3 || !digits.bytes().all(|b| b.is_ascii_digit()) {
             return Err(Error::InvalidPath(
                 "each index component must be 3 digits".into(),
             ));

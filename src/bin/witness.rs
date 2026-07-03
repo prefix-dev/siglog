@@ -7,9 +7,14 @@ use axum::extract::DefaultBodyLimit;
 use clap::Parser;
 use sea_orm::{ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
+use siglog::api::rate_limit;
 use siglog::witness::{handlers, LogConfig, Witness};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tower_governor::{
+    governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
+};
 
 /// Maximum allowed size for witness request bodies (1MB).
 /// This prevents DoS attacks from extremely large checkpoint submissions.
@@ -92,6 +97,28 @@ async fn main() -> anyhow::Result<()> {
     let witness = Arc::new(Witness::new(signer, conn, args.logs));
     tracing::info!("Witness name: {}", witness.name());
 
+    // Rate limiting: /add-checkpoint does signature verification and proof
+    // hashing per request and is unauthenticated.
+    let rate_limit_config = Arc::new(
+        GovernorConfigBuilder::default()
+            // per_second(n) would mean "one request per n seconds"!
+            .per_nanosecond(rate_limit::replenish_interval_ns())
+            .burst_size(rate_limit::rate_limit_burst_size())
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .expect("failed to create rate limit config"),
+    );
+    let governor_limiter = rate_limit_config.limiter().clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            governor_limiter.retain_recent();
+        }
+    });
+    let governor_layer =
+        GovernorLayer::new(rate_limit_config).error_handler(rate_limit::rate_limit_error_handler);
+
     // Build router with body size limit
     let app = axum::Router::new()
         .route(
@@ -102,6 +129,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/ready", axum::routing::get(handlers::ready))
         .with_state(witness)
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .layer(governor_layer)
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(30),
+        ))
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
                 .make_span_with(
@@ -122,17 +154,12 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     tracing::info!("Witness server listening on {}", args.listen);
 
-    // Handle shutdown
-    let shutdown_signal = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-        tracing::info!("Shutdown signal received");
-    };
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal)
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(siglog::shutdown::shutdown_signal())
+    .await?;
 
     tracing::info!("Witness server stopped");
     Ok(())

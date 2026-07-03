@@ -76,9 +76,15 @@ impl Database {
             .await?
             .ok_or_else(|| Error::Internal("log state not found".into()))?;
 
+        // A corrupted root hash must be a loud error: silently mapping it to
+        // None makes the checkpoint worker stop publishing with no logs.
         let root_hash = row
             .root_hash
-            .and_then(|bytes| Sha256Hash::try_from_slice(&bytes).ok());
+            .map(|bytes| {
+                Sha256Hash::try_from_slice(&bytes)
+                    .map_err(|e| Error::Internal(format!("corrupted root hash in log state: {}", e)))
+            })
+            .transpose()?;
 
         Ok(LogState {
             next_index: LogIndex::new(row.next_index as u64),

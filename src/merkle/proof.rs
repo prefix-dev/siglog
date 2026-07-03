@@ -175,6 +175,13 @@ pub async fn compute_subtree_hash(
 
 /// Read a leaf hash from level 0 tiles.
 async fn read_leaf_hash(storage: &TileStorage, index: u64, tree_size: u64) -> Result<Sha256Hash> {
+    if index >= tree_size {
+        return Err(Error::NotFound(format!(
+            "leaf {} beyond tree size {}",
+            index, tree_size
+        )));
+    }
+
     let tile_index = index / TILE_WIDTH;
     let offset = (index % TILE_WIDTH) as usize;
 

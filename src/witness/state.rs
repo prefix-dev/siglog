@@ -87,16 +87,42 @@ impl WitnessStateStore {
         })
     }
 
-    /// Update the witnessed state for a log.
+    /// Update the witnessed state for a log, compare-and-swap style.
     ///
-    /// This is called after successfully verifying a consistency proof.
+    /// This is called after successfully verifying a consistency proof. The
+    /// verification happened against a state read earlier (`expected_size`,
+    /// `expected_root`); this method re-checks under a row lock that the
+    /// persisted state still matches. Without this check, two concurrent
+    /// requests could each verify a proof against the same old state and the
+    /// witness would end up cosigning two conflicting roots at the same size
+    /// (a split view).
+    ///
+    /// Returns `UpdateOutcome::Conflict` if the persisted state no longer
+    /// matches the expected state; the caller must re-read and re-verify.
     pub async fn update(
         &self,
         origin: &str,
+        expected_size: u64,
+        expected_root: &Sha256Hash,
         size: u64,
         root_hash: Sha256Hash,
         checkpoint: &str,
-    ) -> Result<()> {
+    ) -> Result<UpdateOutcome> {
+        // Sizes are stored as i64; reject values that would wrap negative and
+        // corrupt the monotonicity comparison.
+        if size > i64::MAX as u64 || expected_size > i64::MAX as u64 {
+            return Err(Error::InvalidEntry(format!(
+                "tree size {} exceeds supported maximum",
+                size
+            )));
+        }
+        if size < expected_size {
+            return Err(Error::InvalidEntry(format!(
+                "size rollback not allowed: current size {} > new size {}",
+                expected_size, size
+            )));
+        }
+
         let txn = self.conn.begin().await?;
 
         // Lock and get current state
@@ -107,12 +133,15 @@ impl WitnessStateStore {
 
         match current {
             Some(model) => {
-                // Prevent size rollback: new size must be >= current size
-                if (size as i64) < model.size {
-                    return Err(Error::InvalidEntry(format!(
-                        "size rollback not allowed: current size {} > new size {}",
-                        model.size, size
-                    )));
+                // CAS check: the state must not have moved since the caller
+                // verified the consistency proof.
+                if model.size as u64 != expected_size
+                    || model.root_hash != expected_root.as_bytes().to_vec()
+                {
+                    txn.rollback().await?;
+                    return Ok(UpdateOutcome::Conflict {
+                        current_size: model.size as u64,
+                    });
                 }
                 // Update existing
                 witness_state::Entity::update(witness_state::ActiveModel {
@@ -126,6 +155,12 @@ impl WitnessStateStore {
                 .await?;
             }
             None => {
+                // Callers always go through get_or_init first, so an absent
+                // row means the expected state is the initial empty state.
+                if expected_size != 0 {
+                    txn.rollback().await?;
+                    return Ok(UpdateOutcome::Conflict { current_size: 0 });
+                }
                 // Insert new
                 witness_state::Entity::insert(witness_state::ActiveModel {
                     origin: ActiveValue::Set(origin.to_string()),
@@ -140,7 +175,7 @@ impl WitnessStateStore {
         }
 
         txn.commit().await?;
-        Ok(())
+        Ok(UpdateOutcome::Updated)
     }
 
     /// List all witnessed logs.
@@ -159,6 +194,18 @@ impl WitnessStateStore {
             })
             .collect()
     }
+}
+
+/// Outcome of a compare-and-swap state update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    /// The state was updated.
+    Updated,
+    /// The persisted state changed since the caller read it.
+    Conflict {
+        /// The size currently persisted for this log.
+        current_size: u64,
+    },
 }
 
 /// RFC 6962 empty tree root hash.

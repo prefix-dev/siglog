@@ -4,15 +4,19 @@ use axum::extract::DefaultBodyLimit;
 use clap::Parser;
 use siglog::api::handlers::{self, AppState};
 use siglog::api::rate_limit;
+use siglog::checkpoint::signer::Origin;
 use siglog::checkpoint::CheckpointSigner;
 use siglog::sequencer::{Sequencer, SequencerConfig};
 use siglog::storage::{Database, TileStorage};
 use siglog::vindex;
 use siglog::worker::{self, WorkerConfig};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
-use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+use tower_governor::{
+    governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
+};
 
 /// Siglog - A minimal Tessera-compatible transparency log server.
 #[derive(Parser, Debug)]
@@ -85,11 +89,18 @@ struct Args {
     #[arg(long, env = "WITNESS_KEYS")]
     witness_keys: Option<String>,
 
-    /// External witness URLs (comma-separated).
-    /// Format: name=url,name2=url2
-    /// Example: --external-witnesses "witness1=http://localhost:8081,monitor=http://localhost:8082"
+    /// External witnesses (comma-separated).
+    /// Format: name=url=vkey where vkey is the witness's note-format
+    /// verification key (name+hash+base64). Cosignatures are verified
+    /// against this pinned key before counting toward the quorum.
+    /// Example: --external-witnesses "w1=http://localhost:8081=w1+deadbeef+AQ..."
     #[arg(long, env = "EXTERNAL_WITNESSES")]
     external_witnesses: Option<String>,
+
+    /// Minimum number of external witness cosignatures required to publish
+    /// a checkpoint. Defaults to all configured external witnesses.
+    #[arg(long, env = "WITNESS_QUORUM")]
+    witness_quorum: Option<usize>,
 
     /// API key for authenticating write requests (optional).
     /// When set, the /add endpoint requires an Authorization: Bearer <key> header.
@@ -139,6 +150,12 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Validate the origin up front so a bad value fails startup instead of
+    // killing the checkpoint worker after the server is already accepting
+    // writes.
+    Origin::new(args.origin.clone())
+        .map_err(|e| anyhow::anyhow!("invalid LOG_ORIGIN '{}': {}", args.origin, e))?;
+
     // Initialize database
     tracing::info!("Connecting to database...");
     let db = Database::connect(&args.database_url).await?;
@@ -186,49 +203,55 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Checkpoint signer initialized: {}", signer.name());
 
     // Initialize in-process witnesses (for testing/development)
-    let witnesses: Vec<Arc<CheckpointSigner>> = if let Some(witness_keys) = &args.witness_keys {
-        witness_keys
-            .split(',')
-            .filter(|k| !k.trim().is_empty())
-            .map(|key| {
-                let signer =
-                    CheckpointSigner::from_note_key(key.trim()).expect("invalid witness key");
-                tracing::info!("In-process witness initialized: {}", signer.name());
-                Arc::new(signer)
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let mut witnesses: Vec<Arc<CheckpointSigner>> = Vec::new();
+    if let Some(witness_keys) = &args.witness_keys {
+        for key in witness_keys.split(',').filter(|k| !k.trim().is_empty()) {
+            let signer = CheckpointSigner::from_note_key(key.trim())
+                .map_err(|e| anyhow::anyhow!("invalid in-process witness key: {}", e))?;
+            tracing::info!("In-process witness initialized: {}", signer.name());
+            witnesses.push(Arc::new(signer));
+        }
+    }
     tracing::info!("{} in-process witnesses configured", witnesses.len());
 
-    // Parse external witness URLs
-    let external_witnesses: Vec<worker::ExternalWitness> =
-        if let Some(ext_witnesses) = &args.external_witnesses {
-            ext_witnesses
-                .split(',')
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| {
-                    let parts: Vec<&str> = s.trim().splitn(2, '=').collect();
-                    if parts.len() != 2 {
-                        panic!(
-                            "invalid external witness format: expected 'name=url', got '{}'",
-                            s
-                        );
-                    }
-                    let witness = worker::ExternalWitness::new(parts[0], parts[1]);
-                    tracing::info!(
-                        "External witness configured: {} -> {}",
-                        witness.name,
-                        witness.url
-                    );
-                    witness
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+    // Parse external witnesses (name=url=vkey)
+    let mut external_witnesses: Vec<worker::ExternalWitness> = Vec::new();
+    if let Some(ext_witnesses) = &args.external_witnesses {
+        for s in ext_witnesses.split(',').filter(|s| !s.trim().is_empty()) {
+            let parts: Vec<&str> = s.trim().splitn(3, '=').collect();
+            if parts.len() != 3 {
+                anyhow::bail!(
+                    "invalid external witness format: expected 'name=url=vkey', got '{}'. \
+                     The verification key is required so cosignatures can be verified.",
+                    s
+                );
+            }
+            let witness = worker::ExternalWitness::new(parts[0], parts[1], parts[2])
+                .map_err(|e| anyhow::anyhow!("invalid external witness '{}': {}", parts[0], e))?;
+            tracing::info!(
+                "External witness configured: {} -> {}",
+                witness.name,
+                witness.url
+            );
+            external_witnesses.push(witness);
+        }
+    }
     tracing::info!("{} external witnesses configured", external_witnesses.len());
+
+    if let Some(q) = args.witness_quorum {
+        if q > external_witnesses.len() {
+            anyhow::bail!(
+                "WITNESS_QUORUM ({}) exceeds the number of configured external witnesses ({})",
+                q,
+                external_witnesses.len()
+            );
+        }
+        tracing::info!(
+            "Checkpoint publication quorum: {}/{} external witnesses",
+            q,
+            external_witnesses.len()
+        );
+    }
 
     // Create shutdown channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -241,8 +264,10 @@ async fn main() -> anyhow::Result<()> {
     };
     let (sequencer, sequencer_task) = Sequencer::new(db.clone(), sequencer_config);
 
-    // Spawn sequencer
-    tokio::spawn(sequencer_task);
+    // Spawn sequencer (supervised below: if it dies, the process exits so
+    // the orchestrator can restart it, instead of silently acking writes
+    // that never get sequenced).
+    let sequencer_handle = tokio::spawn(sequencer_task);
 
     // Configure workers
     let worker_config = WorkerConfig {
@@ -250,6 +275,7 @@ async fn main() -> anyhow::Result<()> {
         integration_batch_size: 1024,
         checkpoint_interval: Duration::from_secs(args.checkpoint_interval),
         origin: args.origin.clone(),
+        witness_quorum: args.witness_quorum,
     };
 
     // Initialize vindex if enabled (before spawning workers)
@@ -264,13 +290,28 @@ async fn main() -> anyhow::Result<()> {
         let expected_tree_size = log_state.integrated_size.value();
 
         let vi = if let Some(wal_path) = &args.vindex_wal_path {
-            // Validate the WAL against the database state after a crash.
+            // Validate the snapshot + WAL against the database state after a
+            // crash. If the on-disk state is unusable (missing, corrupted, or
+            // behind the database), rebuild it from the log's entry bundles —
+            // the log itself is the source of truth for the index.
             tracing::info!(
                 "Vindex WAL path: {}, expected tree size from DB: {}",
                 wal_path,
                 expected_tree_size
             );
-            vindex::VerifiableIndex::with_wal(map_fn, wal_path, expected_tree_size)?
+            match vindex::VerifiableIndex::with_wal(map_fn.clone(), wal_path, expected_tree_size) {
+                Ok(vi) => vi,
+                Err(e) => {
+                    tracing::warn!("Vindex state unusable ({}); rebuilding from log storage", e);
+                    vindex::VerifiableIndex::rebuild_from_storage(
+                        map_fn,
+                        wal_path,
+                        expected_tree_size,
+                        &storage,
+                    )
+                    .await?
+                }
+            }
         } else {
             if expected_tree_size > 0 {
                 anyhow::bail!(
@@ -292,7 +333,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Spawn integration worker (with optional vindex)
-    tokio::spawn(worker::run_integration_worker(
+    let integration_handle = tokio::spawn(worker::run_integration_worker(
         db.clone(),
         storage.clone(),
         worker_config.clone(),
@@ -301,7 +342,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Spawn checkpoint worker
-    tokio::spawn(worker::run_checkpoint_worker(
+    let checkpoint_handle = tokio::spawn(worker::run_checkpoint_worker(
         db.clone(),
         storage.clone(),
         signer.clone(),
@@ -324,20 +365,38 @@ async fn main() -> anyhow::Result<()> {
     }
     let state = Arc::new(state);
 
-    // Configure rate limiting
+    // Configure rate limiting. SmartIpKeyExtractor prefers standard proxy
+    // headers (x-forwarded-for, x-real-ip, forwarded) and falls back to the
+    // peer address, so per-client limits survive a reverse proxy.
+    let rate_limit_rps = rate_limit::rate_limit_per_second();
+    let rate_limit_burst = rate_limit::rate_limit_burst_size();
     let rate_limit_config = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(rate_limit::RATE_LIMIT_PER_SECOND)
-            .burst_size(rate_limit::RATE_LIMIT_BURST_SIZE)
+            // per_second(n) would mean "one request per n seconds"!
+            .per_nanosecond(rate_limit::replenish_interval_ns())
+            .burst_size(rate_limit_burst)
+            .key_extractor(SmartIpKeyExtractor)
             .finish()
             .expect("failed to create rate limit config"),
     );
+
+    // tower_governor keeps one bucket per client key; without periodic
+    // cleanup that map grows forever.
+    let governor_limiter = rate_limit_config.limiter().clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            governor_limiter.retain_recent();
+        }
+    });
+
     let governor_layer =
         GovernorLayer::new(rate_limit_config).error_handler(rate_limit::rate_limit_error_handler);
     tracing::info!(
         "Rate limiting enabled: {} req/s per IP, burst {}",
-        rate_limit::RATE_LIMIT_PER_SECOND,
-        rate_limit::RATE_LIMIT_BURST_SIZE
+        rate_limit_rps,
+        rate_limit_burst
     );
 
     // Build router
@@ -374,6 +433,10 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state)
         .layer(DefaultBodyLimit::max(handlers::MAX_ENTRY_SIZE))
         .layer(governor_layer)
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(30),
+        ))
         .layer(
             tower_http::trace::TraceLayer::new_for_http()
                 .make_span_with(
@@ -395,18 +458,44 @@ async fn main() -> anyhow::Result<()> {
         args.listen
     );
 
-    // Handle shutdown
+    // Handle shutdown (SIGINT and SIGTERM)
+    let shutting_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_flag = shutting_down.clone();
     let shutdown_signal = async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-        tracing::info!("Shutdown signal received");
+        siglog::shutdown::shutdown_signal().await;
+        shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = shutdown_tx.send(true);
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal)
-        .await?;
+    // Supervise the background pipeline: if any worker dies (panic or
+    // unexpected return) outside of shutdown, exit so the orchestrator
+    // restarts the process, instead of accepting writes that are never
+    // integrated or published.
+    let supervisor_flag = shutting_down.clone();
+    tokio::spawn(async move {
+        let reason = tokio::select! {
+            r = sequencer_handle => format!("sequencer task exited: {:?}", r),
+            r = integration_handle => format!("integration worker exited: {:?}", r),
+            r = checkpoint_handle => format!("checkpoint worker exited: {:?}", r),
+        };
+        if !supervisor_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::error!(
+                "{}; exiting so the orchestrator can restart the process",
+                reason
+            );
+            std::process::exit(1);
+        }
+    });
+
+    // ConnectInfo is required by the rate limiter's key extractor as the
+    // fallback when no proxy headers are present; without it every request
+    // fails with "unable to extract rate limit key".
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal)
+    .await?;
 
     tracing::info!("Server stopped");
     Ok(())
