@@ -43,8 +43,15 @@ impl TileStorage {
     }
 
     /// Create a new tile storage with filesystem backend.
+    ///
+    /// Writes go through a temp directory and are renamed into place, so a
+    /// crash mid-write can never leave a torn tile or checkpoint, and a
+    /// concurrent `GET /checkpoint` never observes a partially-written file.
     pub fn new_fs(root: &str) -> Result<Self> {
-        let builder = Fs::default().root(root);
+        let atomic_dir = std::path::Path::new(root).join(".tmp");
+        let builder = Fs::default()
+            .root(root)
+            .atomic_write_dir(&atomic_dir.to_string_lossy());
 
         let op = Operator::new(builder)?.finish();
 
@@ -162,6 +169,11 @@ impl TileStorage {
             Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Check whether an object exists at a path.
+    pub async fn exists(&self, path: &str) -> Result<bool> {
+        self.op.exists(path).await.map_err(Into::into)
     }
 }
 

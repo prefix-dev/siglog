@@ -26,11 +26,15 @@ path = "src/main.rs"
 name = "witness"
 path = "src/bin/witness.rs"
 
+[[bin]]
+name = "siglog-import"
+path = "src/bin/import.rs"
+
 [dependencies]
 # Web framework
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout"] }
 tower = "0.5"
 tower_governor = "0.8"
 
@@ -78,6 +82,14 @@ indicatif = "0.18.3"
 
 # Optimization
 smallvec = "1.13"
+
+# WAL entry checksums
+crc32fast = "1"
+
+[profile.release]
+# Size/index arithmetic guards the Merkle tree and witness rollback
+# protection; wrap-on-overflow must never silently corrupt those checks.
+overflow-checks = true
 
 [dev-dependencies]
 tempfile = "3"

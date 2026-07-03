@@ -76,7 +76,7 @@ fn test_proof_hash_count_below_limit() {
 #[cfg(test)]
 mod state_tests {
     use sea_orm::{Database, DatabaseConnection};
-    use siglog::witness::WitnessStateStore;
+    use siglog::witness::{UpdateOutcome, WitnessStateStore};
     use sigstore_types::Sha256Hash;
     use std::sync::Arc;
 
@@ -90,6 +90,14 @@ mod state_tests {
         conn
     }
 
+    fn empty_root() -> Sha256Hash {
+        Sha256Hash::from_bytes([
+            0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+            0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+            0x78, 0x52, 0xb8, 0x55,
+        ])
+    }
+
     #[tokio::test]
     async fn test_size_rollback_prevention() {
         let conn = setup_test_db().await;
@@ -100,14 +108,17 @@ mod state_tests {
         let hash2 = Sha256Hash::from_bytes([2u8; 32]);
 
         // Initialize with size 100
-        let _ = store.get_or_init(origin).await.unwrap();
-        store
-            .update(origin, 100, hash1, "checkpoint1")
+        let init = store.get_or_init(origin).await.unwrap();
+        let outcome = store
+            .update(origin, init.size, &init.root_hash, 100, hash1, "checkpoint1")
             .await
             .unwrap();
+        assert_eq!(outcome, UpdateOutcome::Updated);
 
         // Try to rollback to size 50 (should fail)
-        let result = store.update(origin, 50, hash2, "checkpoint2").await;
+        let result = store
+            .update(origin, 100, &hash1, 50, hash2, "checkpoint2")
+            .await;
         assert!(result.is_err(), "Should prevent size rollback");
 
         let err_msg = result.unwrap_err().to_string();
@@ -133,15 +144,18 @@ mod state_tests {
         let hash2 = Sha256Hash::from_bytes([2u8; 32]);
 
         // Initialize with size 100
-        let _ = store.get_or_init(origin).await.unwrap();
+        let init = store.get_or_init(origin).await.unwrap();
         store
-            .update(origin, 100, hash1, "checkpoint1")
+            .update(origin, init.size, &init.root_hash, 100, hash1, "checkpoint1")
             .await
             .unwrap();
 
         // Increase to size 200 (should succeed)
-        let result = store.update(origin, 200, hash2, "checkpoint2").await;
-        assert!(result.is_ok(), "Should allow size increase");
+        let outcome = store
+            .update(origin, 100, &hash1, 200, hash2, "checkpoint2")
+            .await
+            .unwrap();
+        assert_eq!(outcome, UpdateOutcome::Updated, "Should allow size increase");
 
         // Verify the state has changed
         let state = store.get(origin).await.unwrap().unwrap();
@@ -158,14 +172,85 @@ mod state_tests {
         let hash1 = Sha256Hash::from_bytes([1u8; 32]);
 
         // Initialize with size 100
-        let _ = store.get_or_init(origin).await.unwrap();
+        let init = store.get_or_init(origin).await.unwrap();
         store
-            .update(origin, 100, hash1, "checkpoint1")
+            .update(origin, init.size, &init.root_hash, 100, hash1, "checkpoint1")
             .await
             .unwrap();
 
-        // Update with same size (should succeed - allows idempotent updates)
-        let result = store.update(origin, 100, hash1, "checkpoint1").await;
-        assert!(result.is_ok(), "Should allow same size update");
+        // Update with same size and same root (idempotent republish)
+        let outcome = store
+            .update(origin, 100, &hash1, 100, hash1, "checkpoint1")
+            .await
+            .unwrap();
+        assert_eq!(outcome, UpdateOutcome::Updated, "Should allow same size update");
+    }
+
+    #[tokio::test]
+    async fn test_cas_conflict_on_stale_expected_state() {
+        let conn = setup_test_db().await;
+        let store = WitnessStateStore::new(Arc::new(conn));
+
+        let origin = "test-log";
+        let hash1 = Sha256Hash::from_bytes([1u8; 32]);
+        let hash2 = Sha256Hash::from_bytes([2u8; 32]);
+        let hash3 = Sha256Hash::from_bytes([3u8; 32]);
+
+        // Two "concurrent" requests both read the initial state.
+        let init = store.get_or_init(origin).await.unwrap();
+
+        // Request A wins the race.
+        let outcome_a = store
+            .update(origin, init.size, &init.root_hash, 10, hash1, "cp-a")
+            .await
+            .unwrap();
+        assert_eq!(outcome_a, UpdateOutcome::Updated);
+
+        // Request B tries to persist a *different* root at the same size,
+        // using the stale expected state. Must be rejected, otherwise the
+        // witness cosigns two conflicting roots (split view).
+        let outcome_b = store
+            .update(origin, init.size, &init.root_hash, 10, hash2, "cp-b")
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome_b,
+            UpdateOutcome::Conflict { current_size: 10 },
+            "Stale CAS must conflict, not overwrite"
+        );
+
+        // Same-size different-root with a *matching* expected size but stale
+        // root must also conflict.
+        let outcome_c = store
+            .update(origin, 10, &hash2, 10, hash3, "cp-c")
+            .await
+            .unwrap();
+        assert_eq!(outcome_c, UpdateOutcome::Conflict { current_size: 10 });
+
+        let state = store.get(origin).await.unwrap().unwrap();
+        assert_eq!(state.root_hash, hash1, "Winner's root must be preserved");
+    }
+
+    #[tokio::test]
+    async fn test_oversized_tree_size_rejected() {
+        let conn = setup_test_db().await;
+        let store = WitnessStateStore::new(Arc::new(conn));
+
+        let origin = "test-log";
+        let init = store.get_or_init(origin).await.unwrap();
+
+        // Sizes above i64::MAX would wrap negative in the database column and
+        // defeat rollback protection.
+        let result = store
+            .update(
+                origin,
+                init.size,
+                &init.root_hash,
+                u64::MAX,
+                empty_root(),
+                "cp",
+            )
+            .await;
+        assert!(result.is_err(), "Sizes above i64::MAX must be rejected");
     }
 }

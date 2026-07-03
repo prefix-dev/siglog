@@ -15,12 +15,11 @@ mod verifier;
 mod litewitness_test;
 
 pub use proof::{verify_consistency, ConsistencyProof};
-pub use state::WitnessStateStore;
-pub use verifier::{CheckpointVerifier, LogConfig};
+pub use state::{UpdateOutcome, WitnessStateStore};
+pub use verifier::{parse_vkey, CheckpointVerifier, LogConfig};
 
 use crate::checkpoint::{CheckpointSignature, CheckpointSigner, CosignedCheckpoint};
 use crate::error::{Error, Result};
-use ed25519_dalek::Signer;
 use sea_orm::DatabaseConnection;
 use sigstore_types::Sha256Hash;
 use std::sync::Arc;
@@ -89,6 +88,15 @@ impl Witness {
         let new_size = checkpoint.checkpoint.size.value();
         let new_root = checkpoint.checkpoint.root_hash;
 
+        // Sizes are persisted as i64; reject values that would wrap negative
+        // and defeat the rollback protection.
+        if new_size > i64::MAX as u64 {
+            return Err(WitnessError::BadRequest(format!(
+                "checkpoint size {} exceeds supported maximum",
+                new_size
+            )));
+        }
+
         // 4. Validate old_size constraints
         if request.old_size > new_size {
             return Err(WitnessError::BadRequest(format!(
@@ -143,20 +151,34 @@ impl Witness {
             ));
         }
 
-        // 8. Create cosignature
-        let body = checkpoint.checkpoint.to_body();
-        let signature = self.signer.signing_key_ref().sign(body.as_bytes());
-        let cosig = CheckpointSignature {
-            name: self.signer.name().clone(),
-            key_id: self.signer.key_id().clone(),
-            signature,
-        };
-
-        // 9. Update state
-        self.state_store
-            .update(origin, new_size, new_root, &request.checkpoint)
+        // 8. Persist state with a compare-and-swap against the state we
+        // verified the proof for. If a concurrent request advanced the state
+        // in the meantime, we must NOT cosign: the proof we verified may
+        // extend a different view of the tree than the one now persisted.
+        let outcome = self
+            .state_store
+            .update(
+                origin,
+                state.size,
+                &state.root_hash,
+                new_size,
+                new_root,
+                &request.checkpoint,
+            )
             .await
             .map_err(|e| WitnessError::Internal(format!("failed to update state: {}", e)))?;
+
+        if let UpdateOutcome::Conflict { current_size } = outcome {
+            return Err(WitnessError::Conflict(current_size));
+        }
+
+        // 9. Create the cosignature/v1 only after the state is durably
+        // updated (c2sp.org/tlog-cosignature: timestamped, alg-0x04 key ID).
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| WitnessError::Internal(format!("system clock error: {}", e)))?
+            .as_secs();
+        let cosig = self.signer.cosign_v1(&checkpoint.checkpoint, timestamp);
 
         Ok(cosig)
     }

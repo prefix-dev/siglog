@@ -41,6 +41,16 @@ struct Args {
     #[arg(long)]
     dry_run: bool,
 
+    /// Write normalized entries as JSONL to this file instead of submitting
+    /// them over HTTP. Feed the output to `siglog-import` for bulk
+    /// bootstrapping.
+    #[arg(long)]
+    jsonl_out: Option<String>,
+
+    /// API key for authenticating write requests (Bearer token)
+    #[arg(long, env = "API_KEY")]
+    api_key: Option<String>,
+
     /// Number of entries to process (for testing)
     #[arg(long)]
     limit: Option<usize>,
@@ -115,6 +125,12 @@ fn main() -> anyhow::Result<()> {
     let mut error_count = 0;
     let mut indices: HashMap<String, u64> = HashMap::new();
 
+    let mut jsonl_writer: Option<std::io::BufWriter<std::fs::File>> = args
+        .jsonl_out
+        .as_ref()
+        .map(|path| std::fs::File::create(path).map(std::io::BufWriter::new))
+        .transpose()?;
+
     for (filename, entry) in all_packages.into_iter().take(total) {
         pb.set_message(filename.to_string());
 
@@ -127,6 +143,15 @@ fn main() -> anyhow::Result<()> {
         };
 
         let json_bytes = normalized.to_normalized_json();
+
+        if let Some(writer) = &mut jsonl_writer {
+            use std::io::Write;
+            writer.write_all(&json_bytes)?;
+            writer.write_all(b"\n")?;
+            success_count += 1;
+            pb.inc(1);
+            continue;
+        }
 
         if args.dry_run {
             // Just print first few for verification
@@ -143,7 +168,11 @@ fn main() -> anyhow::Result<()> {
 
         // Submit to log
         let add_url = format!("{}/add", args.log_url.trim_end_matches('/'));
-        match client.post(&add_url).body(json_bytes.clone()).send() {
+        let mut request = client.post(&add_url).body(json_bytes.clone());
+        if let Some(key) = &args.api_key {
+            request = request.header("Authorization", format!("Bearer {}", key));
+        }
+        match request.send() {
             Ok(resp) => {
                 if resp.status().is_success() {
                     if let Ok(text) = resp.text() {
@@ -171,6 +200,20 @@ fn main() -> anyhow::Result<()> {
     }
 
     pb.finish_with_message("Done!");
+
+    if let Some(mut writer) = jsonl_writer {
+        use std::io::Write;
+        writer.flush()?;
+        println!("\n=== JSONL Export ===");
+        println!("Subdir: {}", args.subdir);
+        println!("Entries written: {}", success_count);
+        println!("Skipped: {}", skip_count);
+        println!(
+            "Output: {} (feed to siglog-import for bulk bootstrap)",
+            args.jsonl_out.as_deref().unwrap_or_default()
+        );
+        return Ok(());
+    }
 
     println!("\n=== Ingestion Summary ===");
     println!("Subdir: {}", args.subdir);

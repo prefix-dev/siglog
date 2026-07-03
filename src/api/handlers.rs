@@ -267,7 +267,7 @@ pub async fn vindex_lookup(
     key.copy_from_slice(&hash_bytes);
 
     let result = vindex.lookup(&key);
-    let root_hash = vindex.root_hash();
+    let root_hash = result.root_hash;
 
     let response = VindexLookupResponse {
         indices: result.indices.iter().map(|i| i.value()).collect(),
@@ -302,7 +302,7 @@ pub async fn vindex_lookup_key(
         .ok_or_else(|| Error::Internal("vindex not enabled".into()))?;
 
     let result = vindex.lookup_string(&key);
-    let root_hash = vindex.root_hash();
+    let root_hash = result.root_hash;
 
     let response = VindexLookupResponse {
         indices: result.indices.iter().map(|i| i.value()).collect(),

@@ -22,7 +22,6 @@ use crate::witness::{
     WitnessStateStore, WitnessedState,
 };
 use async_trait::async_trait;
-use ed25519_dalek::Signer;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 
@@ -143,7 +142,13 @@ impl<M: Monitor> MonitoringWitness<M> {
             conn: conn.clone(),
             state_store: WitnessStateStore::new(conn),
             logs,
-            http_client: reqwest::Client::new(),
+            // Without a timeout, a hung upstream log stalls add-checkpoint
+            // handlers indefinitely.
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("failed to build HTTP client"),
         }
     }
 
@@ -278,14 +283,17 @@ impl<M: Monitor> MonitoringWitness<M> {
             }
         }
 
-        // 9. Create cosignature
-        let body = checkpoint.checkpoint.to_body();
-        let signature = self.signer.signing_key_ref().sign(body.as_bytes());
-        let cosig = CheckpointSignature {
-            name: self.signer.name().clone(),
-            key_id: self.signer.key_id().clone(),
-            signature,
-        };
+        // 9. Create cosignature/v1 (c2sp.org/tlog-cosignature)
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| {
+                MonitorError::Witness(WitnessError::Internal(format!(
+                    "system clock error: {}",
+                    e
+                )))
+            })?
+            .as_secs();
+        let cosig = self.signer.cosign_v1(&checkpoint.checkpoint, timestamp);
 
         // 10. Commit the validated entries to the monitor's index and database
         if new_size > state.size {
@@ -300,9 +308,17 @@ impl<M: Monitor> MonitoringWitness<M> {
                 })?;
         }
 
-        // 11. Update witness state
-        self.state_store
-            .update(origin, new_size, new_root, &request.checkpoint)
+        // 11. Update witness state (CAS against the state we verified).
+        let outcome = self
+            .state_store
+            .update(
+                origin,
+                state.size,
+                &state.root_hash,
+                new_size,
+                new_root,
+                &request.checkpoint,
+            )
             .await
             .map_err(|e| {
                 MonitorError::Witness(WitnessError::Internal(format!(
@@ -310,6 +326,10 @@ impl<M: Monitor> MonitoringWitness<M> {
                     e
                 )))
             })?;
+
+        if let crate::witness::UpdateOutcome::Conflict { current_size } = outcome {
+            return Err(MonitorError::Witness(WitnessError::Conflict(current_size)));
+        }
 
         Ok(cosig)
     }

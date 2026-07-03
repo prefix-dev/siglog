@@ -84,12 +84,18 @@ cargo build --release
 | `S3_REGION` | S3 region | `auto` |
 | `API_KEY` | Bearer token required for `/add` writes | Required unless `ALLOW_PUBLIC_WRITES=true` |
 | `ALLOW_PUBLIC_WRITES` | Allow unauthenticated `/add` writes for local development | `false` |
+| `EXTERNAL_WITNESSES` | External witnesses to collect cosignatures from, comma-separated. Format: `name=url=vkey` — the note-format verification key is required and cosignatures are verified against it before a checkpoint is published | - |
+| `WITNESS_QUORUM` | Minimum number of external witness cosignatures required to publish a checkpoint | All configured witnesses |
+| `WITNESS_KEYS` | In-process witness private keys for local development (comma-separated) | - |
+| `VINDEX_SNAPSHOT_INTERVAL` | Entries between vindex snapshots. Each snapshot persists the full index and truncates the WAL, bounding WAL growth and startup replay time (0 disables) | `100000` |
+| `RATE_LIMIT_PER_SECOND` | Requests per second allowed per client IP | `100` |
+| `RATE_LIMIT_BURST_SIZE` | Burst capacity per client IP | `200` |
 | `CHECKPOINT_INTERVAL` | Checkpoint frequency (seconds) | `1` |
 | `BATCH_MAX_SIZE` | Max entries per batch | `256` |
 | `BATCH_MAX_AGE_MS` | Max batch age (ms) | `1000` |
 | `VINDEX_ENABLED` | Enable verifiable index | `false` |
 | `VINDEX_KEY_FIELD` | JSON field for key extraction | `name` |
-| `VINDEX_WAL_PATH` | WAL path for persistent vindex recovery | Required when enabling vindex on a non-empty log |
+| `VINDEX_WAL_PATH` | WAL path for persistent vindex state (snapshot is stored alongside as `<path>.snapshot`). If the on-disk state is missing, corrupted, or behind the database, the vindex is automatically rebuilt from the log's entry bundles | Recommended when enabling vindex |
 
 #### Witness Server (`witness`)
 
@@ -206,16 +212,18 @@ A witness independently verifies and co-signs transparency log checkpoints. Runn
 
 #### POST /add-checkpoint
 
-Request body:
-```json
-{
-  "checkpoint": "log.example.com\n123\nROOTHASH...\n\n- log.example.com SIGNATURE...",
-  "proof": ["HASH1...", "HASH2..."],
-  "old_size": 100
-}
+Request body (text/plain, per [c2sp.org/tlog-witness](https://c2sp.org/tlog-witness)):
+```text
+old <size>
+<base64 consistency proof hash>
+...
+
+<checkpoint text with log signature>
 ```
 
-Response (on success): The witness's cosignature line.
+Response (on success): the witness's [cosignature/v1](https://c2sp.org/tlog-cosignature)
+line — a timestamped Ed25519 signature whose key ID is computed with the
+cosignature/v1 algorithm byte (0x04).
 
 ## API Reference
 
@@ -266,6 +274,46 @@ curl http://localhost:8080/tile/0/000
 ```bash
 # Get entry bundle at index 0 (entries 0-255)
 curl http://localhost:8080/tile/entries/000
+```
+
+## Bulk import (backfill)
+
+Bootstrapping a log with existing data should not go through `POST /add` —
+the incremental path acknowledges entries batch-by-batch and rewrites each
+partial tile up to 256 times. `siglog-import` builds the tree in one pass
+with concurrent uploads and produces a byte-identical tree to what
+incremental integration would create (~5,000 entries/s locally vs ~36/s
+over HTTP).
+
+```bash
+# 1. Convert conda repodata to normalized JSONL (one file per subdir)
+conda-log-ingest --file linux-64/repodata.json --subdir linux-64 \
+    --jsonl-out linux-64.jsonl
+
+# 2. Import into an EMPTY log (server must not be running)
+siglog-import \
+    --origin conda.prefix.dev \
+    --database-url sqlite:/data/siglog.db?mode=rwc \
+    --storage-backend s3 \
+    --jsonl noarch.jsonl --jsonl linux-64.jsonl \
+    --epoch-note "conda-forge bootstrap $(date -u +%F), repodata sha256 ..." \
+    --vindex-wal-path /data/vindex.wal
+
+# 3. Start the server; it continues incrementally from the imported state.
+```
+
+The import writes the database state only after every tile and bundle is
+durably uploaded, so an interrupted run can be retried; `--resume` skips
+objects that already exist (use the same `--chunk-size` and input). On
+Fly.io, run it as a one-off machine holding the data volume:
+
+```bash
+fly machine destroy <server-machine> --force     # volume must be free
+fly machine run <image> --volume siglog_data:/data --entrypoint sleep -- infinity
+fly ssh sftp shell   # upload the .jsonl files to /data/
+fly ssh console -C "siglog-import --origin ... --jsonl /data/noarch.jsonl ..."
+fly machine destroy <import-machine> --force
+fly deploy           # recreate the server on the imported state
 ```
 
 ## Deployment

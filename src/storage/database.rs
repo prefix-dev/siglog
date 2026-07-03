@@ -76,9 +76,15 @@ impl Database {
             .await?
             .ok_or_else(|| Error::Internal("log state not found".into()))?;
 
+        // A corrupted root hash must be a loud error: silently mapping it to
+        // None makes the checkpoint worker stop publishing with no logs.
         let root_hash = row
             .root_hash
-            .and_then(|bytes| Sha256Hash::try_from_slice(&bytes).ok());
+            .map(|bytes| {
+                Sha256Hash::try_from_slice(&bytes)
+                    .map_err(|e| Error::Internal(format!("corrupted root hash in log state: {}", e)))
+            })
+            .transpose()?;
 
         Ok(LogState {
             next_index: LogIndex::new(row.next_index as u64),
@@ -166,6 +172,53 @@ impl Database {
                 })
             })
             .collect()
+    }
+
+    /// Initialize the log state after a bulk import into an empty log.
+    ///
+    /// Sets `next_index` and `integrated_size` to the imported size in one
+    /// step. Fails if the log is not empty — bulk import must never fork or
+    /// overwrite an existing tree.
+    pub async fn initialize_imported_state(
+        &self,
+        size: TreeSize,
+        root_hash: Sha256Hash,
+    ) -> Result<()> {
+        if size.value() > i64::MAX as u64 {
+            return Err(Error::Internal(format!(
+                "tree size {} exceeds supported maximum",
+                size.value()
+            )));
+        }
+
+        let txn = self.conn.begin().await?;
+
+        let state = log_state::Entity::find_by_id(1)
+            .lock_exclusive()
+            .one(&txn)
+            .await?
+            .ok_or_else(|| Error::Internal("log state not found".into()))?;
+
+        if state.next_index != 0 || state.integrated_size != 0 {
+            txn.rollback().await?;
+            return Err(Error::Internal(format!(
+                "cannot initialize imported state: log is not empty \
+                 (next_index={}, integrated_size={})",
+                state.next_index, state.integrated_size
+            )));
+        }
+
+        log_state::Entity::update(log_state::ActiveModel {
+            id: ActiveValue::Unchanged(1),
+            next_index: ActiveValue::Set(size.value() as i64),
+            integrated_size: ActiveValue::Set(size.value() as i64),
+            root_hash: ActiveValue::Set(Some(root_hash.as_bytes().to_vec())),
+        })
+        .exec(&txn)
+        .await?;
+
+        txn.commit().await?;
+        Ok(())
     }
 
     /// Mark entries as integrated up to the given size if the state has not

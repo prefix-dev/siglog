@@ -9,6 +9,9 @@ use sha2::{Digest, Sha256};
 /// Ed25519 algorithm identifier for note format.
 const ALG_ED25519: u8 = 0x01;
 
+/// Ed25519 cosignature/v1 algorithm identifier (c2sp.org/tlog-cosignature).
+const ALG_COSIGNATURE_V1: u8 = 0x04;
+
 /// Configuration for a known log.
 #[derive(Debug, Clone)]
 pub struct LogConfig {
@@ -32,7 +35,13 @@ impl LogConfig {
     /// Format: `name+hash_hex+base64(alg + pubkey)`
     /// Example: `example.com/log+deadbeef+AQIDBAUGBwg...`
     pub fn new(origin: String, vkey: &str) -> Result<Self> {
-        let (key_name, key_id, verifying_key) = parse_vkey(vkey)?;
+        let (key_name, alg, key_id, verifying_key) = parse_vkey(vkey)?;
+        if alg != ALG_ED25519 {
+            return Err(Error::Config(format!(
+                "log verification keys must be plain Ed25519 note keys (alg 0x01), got alg 0x{:02x}",
+                alg
+            )));
+        }
 
         Ok(Self {
             origin,
@@ -116,7 +125,12 @@ impl CheckpointVerifier {
 /// Parse a verification key string.
 ///
 /// Format: `name+hash_hex+base64(alg + pubkey)`
-fn parse_vkey(vkey: &str) -> Result<(String, KeyId, VerifyingKey)> {
+///
+/// Accepts plain Ed25519 note keys (alg 0x01) and Ed25519 cosignature/v1
+/// keys (alg 0x04, used by C2SP witnesses). Returns the key name, the
+/// algorithm byte, the key ID (computed with that algorithm byte), and the
+/// public key.
+pub fn parse_vkey(vkey: &str) -> Result<(String, u8, KeyId, VerifyingKey)> {
     let parts: Vec<&str> = vkey.trim().splitn(3, '+').collect();
     if parts.len() != 3 {
         return Err(Error::Config(format!(
@@ -153,10 +167,11 @@ fn parse_vkey(vkey: &str) -> Result<(String, KeyId, VerifyingKey)> {
     }
 
     // Check algorithm byte
-    if key_data[0] != ALG_ED25519 {
+    let alg = key_data[0];
+    if alg != ALG_ED25519 && alg != ALG_COSIGNATURE_V1 {
         return Err(Error::Config(format!(
-            "unsupported algorithm: expected {}, got {}",
-            ALG_ED25519, key_data[0]
+            "unsupported algorithm: expected 0x{:02x} or 0x{:02x}, got 0x{:02x}",
+            ALG_ED25519, ALG_COSIGNATURE_V1, alg
         )));
     }
 
@@ -168,8 +183,8 @@ fn parse_vkey(vkey: &str) -> Result<(String, KeyId, VerifyingKey)> {
     let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)
         .map_err(|e| Error::Config(format!("invalid public key: {}", e)))?;
 
-    // Compute and verify key ID
-    let key_id = compute_key_id(&name, &verifying_key);
+    // Compute and verify key ID (with the algorithm byte from the key data)
+    let key_id = compute_key_id(&name, &verifying_key, alg);
     if key_id.as_u32() != expected_hash {
         return Err(Error::Config(format!(
             "key hash mismatch: expected {:08x}, computed {:08x}",
@@ -178,15 +193,15 @@ fn parse_vkey(vkey: &str) -> Result<(String, KeyId, VerifyingKey)> {
         )));
     }
 
-    Ok((name, key_id, verifying_key))
+    Ok((name, alg, key_id, verifying_key))
 }
 
 /// Compute the key ID for a verifying key per Go's note format.
-fn compute_key_id(name: &str, key: &VerifyingKey) -> KeyId {
+fn compute_key_id(name: &str, key: &VerifyingKey, alg: u8) -> KeyId {
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
     hasher.update(b"\n");
-    hasher.update([ALG_ED25519]);
+    hasher.update([alg]);
     hasher.update(key.as_bytes());
     let hash = hasher.finalize();
 
@@ -225,9 +240,36 @@ mod tests {
         );
 
         // Parse and verify
-        let (parsed_name, parsed_id, parsed_key) = parse_vkey(&vkey).unwrap();
+        let (parsed_name, alg, parsed_id, parsed_key) = parse_vkey(&vkey).unwrap();
         assert_eq!(parsed_name, name);
+        assert_eq!(alg, ALG_ED25519);
         assert_eq!(parsed_id.as_u32(), signer.key_id().as_u32());
+        assert_eq!(parsed_key.as_bytes(), pubkey.as_bytes());
+    }
+
+    #[test]
+    fn test_parse_cosignature_v1_vkey() {
+        use crate::checkpoint::signer::compute_key_id_with_alg;
+
+        let signer = CheckpointSigner::generate("witness.example.com");
+        let pubkey = signer.public_key();
+
+        // Build a cosignature/v1 vkey (alg 0x04) as a C2SP witness would
+        // distribute it.
+        let key_id = compute_key_id_with_alg("witness.example.com", &pubkey, ALG_COSIGNATURE_V1);
+        let mut key_data = Vec::with_capacity(33);
+        key_data.push(ALG_COSIGNATURE_V1);
+        key_data.extend_from_slice(pubkey.as_bytes());
+        let vkey = format!(
+            "witness.example.com+{:08x}+{}",
+            key_id.as_u32(),
+            base64::engine::general_purpose::STANDARD.encode(&key_data)
+        );
+
+        let (parsed_name, alg, parsed_id, parsed_key) = parse_vkey(&vkey).unwrap();
+        assert_eq!(parsed_name, "witness.example.com");
+        assert_eq!(alg, ALG_COSIGNATURE_V1);
+        assert_eq!(parsed_id.as_u32(), key_id.as_u32());
         assert_eq!(parsed_key.as_bytes(), pubkey.as_bytes());
     }
 }
