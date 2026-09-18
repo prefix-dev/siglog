@@ -65,17 +65,7 @@ pub async fn add_entry(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response> {
-    // Check API key if configured
-    if let Some(ref expected_key) = state.api_key {
-        let provided = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
-        match provided {
-            Some(token) if constant_time_eq(token.as_bytes(), expected_key.as_bytes()) => {}
-            _ => return Err(Error::Unauthorized),
-        }
-    }
+    authorize_write(&state, &headers)?;
 
     if body.is_empty() {
         return Err(Error::InvalidEntry("empty entry".into()));
@@ -90,13 +80,23 @@ pub async fn add_entry(
         )));
     }
 
-    // Create entry and add to sequencer
-    let entry = Entry::new(body.to_vec());
-    let index = state.sequencer.add(entry).await?;
+    let index = state.sequencer.add(Entry::new(body.to_vec())).await?;
+    Ok((StatusCode::OK, index.to_string()).into_response())
+}
 
-    // Return index as decimal string
-    let response = (StatusCode::OK, index.to_string());
-    Ok(response.into_response())
+pub(crate) fn authorize_write(state: &AppState, headers: &HeaderMap) -> Result<()> {
+    if let Some(ref expected_key) = state.api_key {
+        let provided = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match provided {
+            Some(token) if constant_time_eq(token.as_bytes(), expected_key.as_bytes()) => {}
+            _ => return Err(Error::Unauthorized),
+        }
+    }
+
+    Ok(())
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

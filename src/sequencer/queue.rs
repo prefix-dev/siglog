@@ -153,7 +153,7 @@ impl SequencerWorker {
         match result {
             Ok(sequenced) => {
                 for (req, seq_entry) in requests.into_iter().zip(sequenced.into_iter()) {
-                    let _ = req.response.send(Ok(seq_entry.index()));
+                    let _ = req.response.send(seq_entry.map(|entry| entry.index()));
                 }
             }
             Err(e) => {

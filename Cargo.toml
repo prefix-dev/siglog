@@ -49,7 +49,10 @@ sigstore-crypto = "0.6.0"
 clap = { version = "4", features = ["derive", "env"] }
 
 # Cryptography
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+# Already used by sigstore-crypto; direct access for prehashed verification and strict DER parsing.
+aws-lc-rs = "1.15"
+x509-cert = "0.2"
+ed25519-dalek = { version = "2", features = ["rand_core", "digest"] }
 rand = "0.8"
 sha2 = "0.10"
 

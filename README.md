@@ -2,7 +2,7 @@
 
 # siglog
 
-A Rust implementation of a [Tessera](https://github.com/transparency-dev/tessera)-compatible transparency log server for package distribution systems.
+A Rust transparency log server for package distribution systems, with [Tessera](https://github.com/transparency-dev/tessera) and [Rekor v2](https://github.com/sigstore/rekor-tiles) HTTP API modes.
 
 This implementation follows the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) specification and provides an append-only Merkle tree with cryptographic guarantees that all users see the same data.
 
@@ -71,6 +71,7 @@ cargo build --release
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `LOG_MODE` | API mode: `tessera` or `rekor` (`--mode`) | `tessera` |
 | `LISTEN_ADDR` | Server listen address | `0.0.0.0:8080` |
 | `DATABASE_URL` | Database connection string | `sqlite:./siglog.db?mode=rwc` |
 | `LOG_ORIGIN` | Log origin identifier | Required |
@@ -82,8 +83,8 @@ cargo build --release
 | `S3_SECRET_KEY` | S3 secret key | - |
 | `S3_ENDPOINT` | S3 endpoint URL | - |
 | `S3_REGION` | S3 region | `auto` |
-| `API_KEY` | Bearer token required for `/add` writes | Required unless `ALLOW_PUBLIC_WRITES=true` |
-| `ALLOW_PUBLIC_WRITES` | Allow unauthenticated `/add` writes for local development | `false` |
+| `API_KEY` | Bearer token required for write requests in either mode | Required unless `ALLOW_PUBLIC_WRITES=true` |
+| `ALLOW_PUBLIC_WRITES` | Allow unauthenticated writes for local development | `false` |
 | `CHECKPOINT_INTERVAL` | Checkpoint frequency (seconds) | `1` |
 | `BATCH_MAX_SIZE` | Max entries per batch | `256` |
 | `BATCH_MAX_AGE_MS` | Max batch age (ms) | `1000` |
@@ -219,7 +220,80 @@ Response (on success): The witness's cosignature line.
 
 ## API Reference
 
-### Log Server Endpoints
+### Choosing an API mode
+
+```bash
+# Existing raw-entry API (default)
+./target/release/siglog --mode tessera
+
+# Rekor v2 HTTP/JSON API; use a NEW database and tile storage directory
+./target/release/siglog --mode rekor \
+  --database-url 'sqlite:./rekor.db?mode=rwc' --fs-root ./rekor-tiles
+```
+
+Both commands also require the signing key, origin, and write-authentication configuration described above.
+The selected mode is persisted in the database; startup rejects a different mode.
+Existing non-empty, unmarked databases are treated as Tessera logs. Use separate
+storage, databases, and log identities for separate logs—do not mix their writers.
+
+Rekor mode exposes:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v2/log/entries` | POST | Verify and integrate a hashedrekord v0.0.2 entry |
+| `/api/v2/checkpoint` | GET | Latest signed checkpoint |
+| `/api/v2/tile/{level}/{index}` | GET | Hash tile, including partial tiles |
+| `/api/v2/tile/entries/{index}` | GET | Entry bundle, including partial bundles |
+| `/health`, `/ready` | GET | Health and readiness |
+
+`/add` is **not exposed** in Rekor mode. Existing explorer/package-monitor clients
+that use the unprefixed API should continue using Tessera mode. Generic tile readers
+can use `/api/v2/` as their read base URL in Rekor mode.
+
+The submission schema follows [Rekor v2](https://github.com/sigstore/rekor-tiles/blob/v2.3.0/api/proto/rekor/v2/entry.proto):
+
+```json
+{
+  "hashedRekordRequestV002": {
+    "digest": "BASE64_ARTIFACT_SHA256",
+    "signature": {
+      "content": "BASE64_DER_ECDSA_SIGNATURE",
+      "verifier": {
+        "publicKey": {"rawBytes": "BASE64_DER_SPKI_PUBLIC_KEY"},
+        "keyDetails": "PKIX_ECDSA_P256_SHA_256"
+      }
+    }
+  }
+}
+```
+
+Use `Content-Type: application/json` and `Authorization: Bearer <API_KEY>`.
+Exactly one `publicKey` or `x509Certificate` (DER, base64-encoded `rawBytes`) is required.
+Supported signature algorithms are Ed25519ph/SHA-512 (`PKIX_ED25519_PH`, empty
+context), ECDSA P-256/SHA-256, P-384/SHA-384, P-521/SHA-512 and RSA PKCS#1 v1.5
+SHA-256 with 2048/3072/4096-bit keys. Ed25519ph takes the artifact's SHA-512 digest;
+pure Ed25519 signatures over that digest are not interchangeable.
+Artifact signatures and key/algorithm agreement are verified before sequencing.
+Certificate trust/identity policy remains the client's responsibility, as in Rekor.
+RSA-PSS, deprecated DSSE submissions, and gRPC transport are not implemented.
+
+A successful write returns HTTP **201** and a Sigstore `TransparencyLogEntry`:
+canonicalized body, log ID, kind/version, and inclusion proof against a **published,
+signed checkpoint**. Protobuf JSON integer fields are strings and byte fields are
+base64. No v1 signed-entry timestamp/inclusion promise is issued.
+The log ID is the full SHA-256 note-key hash, matching rekor-tiles v2.3.0.
+
+Requests wait up to 30 seconds for sequencing, integration, and checkpoint publication
+(including configured witnesses). A 504 does **not** undo a queued entry.
+Exact canonical entries are deduplicated permanently and atomically in the database,
+including concurrent retries, pending entries, and retries after restarts. A duplicate
+returns HTTP **409**, gRPC JSON code **6**, and an `x-log-index` header with the original
+index. This is not an inclusion promise: that entry may still await integration.
+Different signatures or verification material produce different entries even for the
+same artifact. Tessera mode still appends every submission.
+Request bodies and canonical entries are each limited to 65,535 bytes.
+
+### Tessera Log Server Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -386,6 +460,22 @@ Clients can verify entries against the transparency log:
 3. Verify any witness cosignatures
 4. For a specific entry, fetch the inclusion proof
 5. Verify the proof against the checkpoint root hash
+
+### Rekor interoperability checks
+
+```bash
+cargo test --workspace
+cargo build --bin siglog
+(cd rekor-conformance && go test -v)
+```
+
+The Go test requires Go 1.25.8+ (or automatic Go toolchain downloads). It launches an
+isolated local server and uses the upstream rekor-tiles v2.3.0 writer and verifier
+to check all supported signing algorithms, public keys and certificates, canonical
+entry reconstruction, Ed25519ph signatures, duplicate responses, and inclusion proofs
+across a full tile boundary. CI also checks concurrent deduplication and rollback on
+SQLite and PostgreSQL; locally, set `SIGLOG_TEST_POSTGRES_URL` to a dedicated empty
+PostgreSQL database to run that check.
 
 ## License
 

@@ -257,20 +257,26 @@ async fn write_entry_bundles(
     for (bundle_idx, entries) in bundles {
         let partial = crate::api::paths::partial_tile_size(0, bundle_idx, to);
 
-        // Load existing bundle if partial
-        let mut bundle = if partial > 0 {
-            let existing_partial = crate::api::paths::partial_tile_size(0, bundle_idx, from);
-            if existing_partial > 0 {
-                storage
-                    .read_entry_bundle(
-                        TileIndex::new(bundle_idx),
-                        PartialSize::new(existing_partial),
-                    )
-                    .await?
-                    .unwrap_or_default()
-            } else {
-                EntryBundle::new()
+        // Preserve the old prefix even when this batch completes the bundle.
+        let existing_partial = if bundle_idx == from / ENTRY_BUNDLE_WIDTH {
+            (from % ENTRY_BUNDLE_WIDTH) as u8
+        } else {
+            0
+        };
+        let mut bundle = if existing_partial > 0 {
+            let bundle = storage
+                .read_entry_bundle(
+                    TileIndex::new(bundle_idx),
+                    PartialSize::new(existing_partial),
+                )
+                .await?
+                .ok_or_else(|| Error::Internal("missing previous entry bundle".into()))?;
+            if bundle.len() != existing_partial as usize {
+                return Err(Error::Internal(
+                    "incorrect previous entry bundle length".into(),
+                ));
             }
+            bundle
         } else {
             EntryBundle::new()
         };
@@ -588,6 +594,69 @@ mod tests {
     use sigstore_types::Sha256Hash;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn bundles_preserve_prefix_across_boundaries() {
+        let storage = TileStorage::new(
+            opendal::Operator::new(opendal::services::Memory::default())
+                .unwrap()
+                .finish(),
+        );
+        let mut from = 0;
+        for to in [1, 255, 256, 300, 768, 769] {
+            let pending: Vec<_> = (from..to)
+                .map(|i: u64| {
+                    let data = EntryData::from(i.to_string());
+                    crate::storage::database::PendingEntry {
+                        index: LogIndex::new(i),
+                        leaf_hash: sigstore_merkle::hash_leaf(data.as_bytes()),
+                        data,
+                    }
+                })
+                .collect();
+            write_entry_bundles(&storage, &pending, TreeSize::new(from), TreeSize::new(to))
+                .await
+                .unwrap();
+            for index in 0..to.div_ceil(256) {
+                let partial = crate::api::paths::partial_tile_size(0, index, to);
+                let bundle = storage
+                    .read_entry_bundle(TileIndex::new(index), PartialSize::new(partial))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    bundle.len(),
+                    if partial == 0 { 256 } else { partial as usize }
+                );
+                for (offset, entry) in bundle.entries.iter().enumerate() {
+                    assert_eq!(
+                        entry.as_bytes(),
+                        (index * 256 + offset as u64).to_string().as_bytes()
+                    );
+                }
+            }
+            from = to;
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_bundle_prefix_is_an_error() {
+        let storage = TileStorage::new(
+            opendal::Operator::new(opendal::services::Memory::default())
+                .unwrap()
+                .finish(),
+        );
+        let entry = crate::storage::database::PendingEntry {
+            index: LogIndex::new(255),
+            data: EntryData::from("last"),
+            leaf_hash: sigstore_merkle::hash_leaf(b"last"),
+        };
+        assert!(
+            write_entry_bundles(&storage, &[entry], TreeSize::new(255), TreeSize::new(256))
+                .await
+                .is_err()
+        );
+    }
 
     fn test_signer(name: &str) -> CheckpointSigner {
         CheckpointSigner::generate(name)

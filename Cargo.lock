@@ -884,6 +884,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "sha2",
+ "signature",
  "subtle",
  "zeroize",
 ]
@@ -3252,6 +3253,7 @@ dependencies = [
  "anyhow",
  "async-recursion",
  "async-trait",
+ "aws-lc-rs",
  "axum",
  "base64",
  "chrono",
@@ -3282,6 +3284,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+ "x509-cert",
 ]
 
 [[package]]
