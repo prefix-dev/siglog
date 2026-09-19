@@ -53,6 +53,12 @@ pub async fn add_checkpoint<M: Monitor + 'static>(
 /// Convert a MonitorError to an HTTP response.
 fn monitor_error_to_response(err: MonitorError) -> Response {
     match err {
+        MonitorError::Busy => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            "monitor busy; retry later",
+        )
+            .into_response(),
         MonitorError::Witness(witness_err) => {
             use crate::witness::WitnessError;
 

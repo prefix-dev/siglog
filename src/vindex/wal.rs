@@ -337,7 +337,13 @@ pub fn validate_and_truncate_wal(path: impl AsRef<Path>, expected_tree_size: u64
     while let Some((idx, keys)) = reader.next_entry()? {
         let idx_val = idx.value();
 
-        if expected_tree_size == 0 || idx_val < expected_tree_size {
+        if idx_val < expected_tree_size {
+            let next = max_valid_idx.map(|i| i + 1).unwrap_or(0);
+            if idx_val != next {
+                return Err(Error::Internal(format!(
+                    "non-contiguous vindex WAL: expected {next}, got {idx_val}; rebuild required"
+                )));
+            }
             // This entry is within bounds
             // Binary format: 1 byte version + 8 bytes index + 1 byte count + 32*count bytes keys
             let entry_size = 1 + 8 + 1 + (keys.len() as u64 * 32);

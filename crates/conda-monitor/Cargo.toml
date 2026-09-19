@@ -53,8 +53,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "blocking"] }
-indicatif = "0.17"
+reqwest = { version = "0.13", features = ["json", "blocking"] }
+indicatif = "0.18.3"
 
 [dev-dependencies]
 tempfile = "3"
+wiremock = "0.6"

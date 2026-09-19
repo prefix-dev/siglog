@@ -90,6 +90,9 @@ impl Witness {
         let new_root = checkpoint.checkpoint.root_hash;
 
         // 4. Validate old_size constraints
+        if new_size > i64::MAX as u64 {
+            return Err(WitnessError::BadRequest("tree too large".into()));
+        }
         if request.old_size > new_size {
             return Err(WitnessError::BadRequest(format!(
                 "old_size ({}) > checkpoint size ({})",
@@ -107,6 +110,10 @@ impl Witness {
         // 6. Check for conflicts
         if request.old_size != state.size {
             return Err(WitnessError::Conflict(state.size));
+        }
+
+        if new_size == 0 && new_root != state.root_hash {
+            return Err(WitnessError::InvalidProof("invalid empty root".into()));
         }
 
         // 7. Verify consistency proof (if not bootstrapping from empty)
@@ -153,10 +160,19 @@ impl Witness {
         };
 
         // 9. Update state
-        self.state_store
-            .update(origin, new_size, new_root, &request.checkpoint)
+        if !self
+            .state_store
+            .update(&state, new_size, new_root, &request.checkpoint)
             .await
-            .map_err(|e| WitnessError::Internal(format!("failed to update state: {}", e)))?;
+            .map_err(|e| WitnessError::Internal(format!("failed to update state: {}", e)))?
+        {
+            let current = self
+                .state_store
+                .get_or_init(origin)
+                .await
+                .map_err(|e| WitnessError::Internal(e.to_string()))?;
+            return Err(WitnessError::Conflict(current.size));
+        }
 
         Ok(cosig)
     }

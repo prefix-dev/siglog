@@ -144,6 +144,7 @@ impl WalWriterVariant {
 
 /// The verifiable index maintains a mapping from keys to log indices.
 pub struct VerifiableIndex {
+    indexing: std::sync::Mutex<()>,
     /// The key → indices mapping.
     index: RwLock<HashMap<IndexKey, Vec<LogIndex>>>,
     /// WAL writer for persistence.
@@ -207,6 +208,7 @@ impl VerifiableIndex {
         );
 
         Self {
+            indexing: std::sync::Mutex::new(()),
             index: RwLock::new(HashMap::new()),
             wal_writer: None,
             map_fn,
@@ -324,6 +326,7 @@ impl VerifiableIndex {
         );
 
         Ok(Self {
+            indexing: std::sync::Mutex::new(()),
             index: RwLock::new(index),
             wal_writer: Some(RwLock::new(wal_writer)),
             map_fn,
@@ -338,7 +341,18 @@ impl VerifiableIndex {
     ///
     /// Extracts keys from the entry data and adds them to the index.
     pub fn index_entry(&self, idx: LogIndex, data: &[u8]) -> Result<()> {
-        let keys = self.map_fn.map(data);
+        let _guard = self.indexing.lock().unwrap();
+        let next = self.tree_size();
+        // Sequenced entries are immutable; retries must not append duplicate WAL records.
+        if idx.value() < next {
+            return Ok(());
+        }
+        if idx.value() != next {
+            return Err(Error::InvalidEntry("non-contiguous index entry".into()));
+        }
+        let mut keys = self.map_fn.map(data);
+        keys.sort_unstable();
+        keys.dedup();
 
         if keys.len() > Self::MAX_KEYS_PER_ENTRY {
             return Err(Error::InvalidEntry(format!(
@@ -769,7 +783,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), Error::IndexFull(_)));
 
         // Adding duplicate key should still work
-        let result = index.index_entry(LogIndex::new(3), br#"{"name": "foo"}"#);
+        let result = index.index_entry(LogIndex::new(2), br#"{"name": "foo"}"#);
         assert!(result.is_ok());
     }
 
@@ -794,7 +808,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), Error::IndexFull(_)));
 
         // Adding a different key should still work
-        let result = index.index_entry(LogIndex::new(3), br#"{"name": "bar"}"#);
+        let result = index.index_entry(LogIndex::new(2), br#"{"name": "bar"}"#);
         assert!(result.is_ok());
     }
 }

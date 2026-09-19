@@ -6,6 +6,7 @@ resolver = "2"
 name = "siglog"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.95"
 description = "A minimal Tessera-compatible transparency log server"
 license = "BSD-3-Clause"
 repository = "https://github.com/prefix-dev/siglog"
@@ -35,7 +36,7 @@ tower = "0.5"
 tower_governor = "0.8"
 
 # Storage
-opendal = { version = "0.51", features = ["services-s3", "services-memory", "services-fs"] }
+opendal = { version = "0.59.2", features = ["services-s3", "services-memory", "services-fs"] }
 sea-orm = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-postgres", "sqlx-sqlite"] }
 sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-postgres", "sqlx-sqlite"] }
 chrono = { version = "0.4", features = ["serde"] }

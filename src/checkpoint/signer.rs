@@ -148,6 +148,18 @@ impl CheckpointSigner {
         &self.signing_key
     }
 
+    /// Export the public note verification key (safe to distribute).
+    pub fn verification_key(&self) -> String {
+        let mut key = vec![ALG_ED25519];
+        key.extend_from_slice(self.public_key().as_bytes());
+        format!(
+            "{}+{:08x}+{}",
+            self.name,
+            self.key_id.as_u32(),
+            STANDARD.encode(key)
+        )
+    }
+
     /// Export as note-format private key string (Go compatible).
     /// Format: PRIVATE+KEY+name+hash_hex+base64(alg + seed)
     pub fn to_note_key(&self) -> String {

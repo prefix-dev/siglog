@@ -4,13 +4,13 @@
 
 A Rust transparency log server for package distribution systems, with [Tessera](https://github.com/transparency-dev/tessera) and [Rekor v2](https://github.com/sigstore/rekor-tiles) HTTP API modes.
 
-This implementation follows the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) specification and provides an append-only Merkle tree with cryptographic guarantees that all users see the same data.
+This implementation follows the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) specification and provides signed checkpoints and append-only Merkle proofs. Detecting split views requires independent witnesses and client verification.
 
 ## Features
 
 - **Transparency Log Server**: Accepts entries, builds a Merkle tree, and publishes signed checkpoints
 - **Witness Server**: Independent co-signing of checkpoints following the [tlog-witness](https://c2sp.org/tlog-witness) specification
-- **Verifiable Index**: Optional key-value index with cryptographic proofs for efficient lookups
+- **Verifiable Index**: Optional key-value lookup hints; its root is not authenticated by the log checkpoint
 - **Multiple Storage Backends**: S3-compatible storage (Tigris, MinIO) or local filesystem
 - **Multiple Database Backends**: SQLite (with LiteFS for distribution) or PostgreSQL
 
@@ -48,7 +48,7 @@ This implementation follows the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) s
 
 ### Prerequisites
 
-- Rust 1.75+ (install via [rustup](https://rustup.rs/))
+- Rust 1.95+ (install via [rustup](https://rustup.rs/))
 - SQLite 3.x or PostgreSQL 14+
 - (Optional) S3-compatible storage for production
 
@@ -85,6 +85,8 @@ cargo build --release
 | `S3_REGION` | S3 region | `auto` |
 | `API_KEY` | Bearer token required for write requests in either mode | Required unless `ALLOW_PUBLIC_WRITES=true` |
 | `ALLOW_PUBLIC_WRITES` | Allow unauthenticated writes for local development | `false` |
+| `EXTERNAL_WITNESSES` | Comma-separated `name=url` witness endpoints | - |
+| `EXTERNAL_WITNESS_KEYS` | Comma-separated pinned public note keys, one for each external witness name | Required with external witnesses |
 | `CHECKPOINT_INTERVAL` | Checkpoint frequency (seconds) | `1` |
 | `BATCH_MAX_SIZE` | Max entries per batch | `256` |
 | `BATCH_MAX_AGE_MS` | Max batch age (ms) | `1000` |
@@ -134,10 +136,10 @@ pub_bytes = public_key.public_bytes_raw()
 
 # Key ID is first 4 bytes of SHA256(name || 0x0a || 0x01 || pubkey)
 h = hashlib.sha256(name.encode() + b"\n\x01" + pub_bytes).digest()
-key_id = base64.b64encode(h[:4]).decode().rstrip("=")
+key_id = h[:4].hex()
 
-private_note = f"PRIVATE+KEY+{name}+{key_id}+{base64.b64encode(b'\\x01' + seed).decode()}"
-public_note = f"{name}+{key_id}+{base64.b64encode(b'\\x01' + pub_bytes).decode()}"
+private_note = f"PRIVATE+KEY+{name}+{key_id}+{base64.b64encode(bytes([1]) + seed).decode()}"
+public_note = f"{name}+{key_id}+{base64.b64encode(bytes([1]) + pub_bytes).decode()}"
 
 print(f"Private: {private_note}")
 print(f"Public:  {public_note}")
@@ -151,7 +153,8 @@ The easiest way to run locally is with Docker Compose:
 
 ```bash
 # Create a .env file with LOG_PRIVATE_KEY, LOG_PUBLIC_KEY,
-# WITNESS_PRIVATE_KEY, and MONITOR_PRIVATE_KEY.
+# WITNESS_PRIVATE_KEY, WITNESS_PUBLIC_KEY, MONITOR_PRIVATE_KEY,
+# and MONITOR_PUBLIC_KEY (public keys named witness and monitor).
 
 # Build and start services
 docker compose -f docker/docker-compose.yml build
@@ -182,6 +185,15 @@ export DATABASE_URL="sqlite:./witness.db"
 
 ./target/release/witness
 ```
+
+### Security and upgrade notes
+
+- External witnesses require pinned public note keys; names and URLs alone are no longer sufficient. Every configured witness signature is verified before publication.
+- Monitoring witnesses authenticate every new entry against the signed checkpoint. Concurrent monitor requests receive HTTP 503 with `Retry-After`; state is reloaded for the selected origin, and content indices and checkpoints commit in one database transaction. This prioritizes correctness over monitor throughput.
+- `conda-log-verify` requires `--log-origin` and `--log-key` from a trusted source. It verifies checkpoint signatures and entry inclusion, and exits nonzero on failure. It does not establish checkpoint freshness, witness quorum, or lookup completeness.
+- Vindex failures stop integration rather than silently omitting entries. WAL gaps fail startup; rebuild an inconsistent index from authenticated entries. WAL recovery discards all entries when the database is empty.
+- Docker processes run as UID/GID `10001:10001`. Existing data volumes must be writable by that identity before upgrading. Filesystem object replacement is atomic.
+- CI audits dependencies. The only advisory exception is the unused `rsa` dependency in SQLx's optional MySQL lockfile graph; CI also checks that it is absent from the enabled runtime graph.
 
 ## Running a Witness
 

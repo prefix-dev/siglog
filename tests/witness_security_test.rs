@@ -102,12 +102,24 @@ mod state_tests {
         // Initialize with size 100
         let _ = store.get_or_init(origin).await.unwrap();
         store
-            .update(origin, 100, hash1, "checkpoint1")
+            .update(
+                &store.get_or_init(origin).await.unwrap(),
+                100,
+                hash1,
+                "checkpoint1",
+            )
             .await
             .unwrap();
 
         // Try to rollback to size 50 (should fail)
-        let result = store.update(origin, 50, hash2, "checkpoint2").await;
+        let result = store
+            .update(
+                &store.get_or_init(origin).await.unwrap(),
+                50,
+                hash2,
+                "checkpoint2",
+            )
+            .await;
         assert!(result.is_err(), "Should prevent size rollback");
 
         let err_msg = result.unwrap_err().to_string();
@@ -135,12 +147,24 @@ mod state_tests {
         // Initialize with size 100
         let _ = store.get_or_init(origin).await.unwrap();
         store
-            .update(origin, 100, hash1, "checkpoint1")
+            .update(
+                &store.get_or_init(origin).await.unwrap(),
+                100,
+                hash1,
+                "checkpoint1",
+            )
             .await
             .unwrap();
 
         // Increase to size 200 (should succeed)
-        let result = store.update(origin, 200, hash2, "checkpoint2").await;
+        let result = store
+            .update(
+                &store.get_or_init(origin).await.unwrap(),
+                200,
+                hash2,
+                "checkpoint2",
+            )
+            .await;
         assert!(result.is_ok(), "Should allow size increase");
 
         // Verify the state has changed
@@ -160,12 +184,24 @@ mod state_tests {
         // Initialize with size 100
         let _ = store.get_or_init(origin).await.unwrap();
         store
-            .update(origin, 100, hash1, "checkpoint1")
+            .update(
+                &store.get_or_init(origin).await.unwrap(),
+                100,
+                hash1,
+                "checkpoint1",
+            )
             .await
             .unwrap();
 
         // Update with same size (should succeed - allows idempotent updates)
-        let result = store.update(origin, 100, hash1, "checkpoint1").await;
+        let result = store
+            .update(
+                &store.get_or_init(origin).await.unwrap(),
+                100,
+                hash1,
+                "checkpoint1",
+            )
+            .await;
         assert!(result.is_ok(), "Should allow same size update");
     }
 }

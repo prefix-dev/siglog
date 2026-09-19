@@ -10,6 +10,29 @@ use crate::types::{PartialSize, TileIndex, TileLevel};
 use sigstore_merkle::hash_children;
 use sigstore_types::Sha256Hash;
 
+/// Hash tile source, shared by local proof generation and remote verification.
+#[async_trait::async_trait]
+pub trait TileReader: Send + Sync {
+    async fn read_tile(
+        &self,
+        level: TileLevel,
+        index: TileIndex,
+        partial: PartialSize,
+    ) -> Result<Option<crate::merkle::HashTile>>;
+}
+
+#[async_trait::async_trait]
+impl TileReader for TileStorage {
+    async fn read_tile(
+        &self,
+        level: TileLevel,
+        index: TileIndex,
+        partial: PartialSize,
+    ) -> Result<Option<crate::merkle::HashTile>> {
+        TileStorage::read_tile(self, level, index, partial).await
+    }
+}
+
 /// Tile width (256 hashes per tile per level).
 const TILE_WIDTH: u64 = 256;
 
@@ -21,7 +44,7 @@ const TILE_WIDTH: u64 = 256;
 /// This function handles small trees where higher-level tiles don't exist
 /// by computing internal hashes from level 0 tiles.
 pub async fn generate_consistency_proof_simple(
-    storage: &TileStorage,
+    storage: &dyn TileReader,
     old_size: u64,
     new_size: u64,
 ) -> Result<Vec<Sha256Hash>> {
@@ -44,7 +67,7 @@ pub async fn generate_consistency_proof_simple(
 /// This implements the algorithm to match the verification in witness/proof.rs.
 #[async_recursion::async_recursion]
 async fn proof_nodes(
-    storage: &TileStorage,
+    storage: &dyn TileReader,
     old_size: u64,
     new_size: u64,
     start_from_old_root: bool,
@@ -76,7 +99,7 @@ async fn proof_nodes(
 
 /// Get sibling hashes along the path from old_size subtree to new root.
 async fn path_siblings(
-    storage: &TileStorage,
+    storage: &dyn TileReader,
     _old_size: u64,
     new_size: u64,
     start_level: u64,
@@ -109,7 +132,7 @@ async fn path_siblings(
 /// Recursive subproof algorithm per RFC 9162.
 #[async_recursion::async_recursion]
 async fn subproof(
-    storage: &TileStorage,
+    storage: &dyn TileReader,
     m: u64,
     n: u64,
     base: u64,
@@ -143,7 +166,7 @@ async fn subproof(
 /// Compute the hash of a subtree from start to end.
 #[async_recursion::async_recursion]
 pub async fn compute_subtree_hash(
-    storage: &TileStorage,
+    storage: &dyn TileReader,
     start: u64,
     end: u64,
     tree_size: u64,
@@ -170,7 +193,11 @@ pub async fn compute_subtree_hash(
 }
 
 /// Read a leaf hash from level 0 tiles.
-async fn read_leaf_hash(storage: &TileStorage, index: u64, tree_size: u64) -> Result<Sha256Hash> {
+async fn read_leaf_hash(
+    storage: &dyn TileReader,
+    index: u64,
+    tree_size: u64,
+) -> Result<Sha256Hash> {
     let tile_index = index / TILE_WIDTH;
     let offset = (index % TILE_WIDTH) as usize;
 
@@ -206,7 +233,7 @@ async fn read_leaf_hash(storage: &TileStorage, index: u64, tree_size: u64) -> Re
 
 /// Try to read a hash from a tile at the specified level.
 async fn try_read_tile_hash(
-    storage: &TileStorage,
+    storage: &dyn TileReader,
     level: u8,
     index: u64,
     tree_size: u64,
@@ -249,7 +276,7 @@ async fn try_read_tile_hash(
 
 /// RFC 6962 inclusion path, ordered from leaf to root, at one fixed tree size.
 pub async fn generate_inclusion_proof(
-    storage: &TileStorage,
+    storage: &dyn TileReader,
     index: u64,
     tree_size: u64,
 ) -> Result<Vec<Sha256Hash>> {

@@ -90,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Initialize database
-    tracing::info!("Connecting to database: {}", args.database_url);
+    tracing::info!("Connecting to database");
     let conn = connect_database(&args.database_url).await?;
     let conn = Arc::new(conn);
     tracing::info!("Database connected and migrations complete");

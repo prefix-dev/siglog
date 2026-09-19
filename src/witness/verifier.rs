@@ -1,9 +1,9 @@
 //! Checkpoint signature verification.
 
-use crate::checkpoint::{CosignedCheckpoint, KeyId};
+use crate::checkpoint::{CheckpointSignature, CosignedCheckpoint, KeyId};
 use crate::error::{Error, Result};
 use base64::Engine;
-use ed25519_dalek::{Verifier, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
 /// Ed25519 algorithm identifier for note format.
@@ -51,6 +51,15 @@ impl LogConfig {
         Ok(config)
     }
 
+    pub fn verify_signature(&self, signature: &CheckpointSignature, body: &[u8]) -> Result<()> {
+        if signature.key_id != self.key_id || signature.name.as_str() != self.key_name {
+            return Err(Error::Signing("signature key identity mismatch".into()));
+        }
+        self.verifying_key
+            .verify_strict(body, &signature.signature)
+            .map_err(|e| Error::Signing(e.to_string()))
+    }
+
     /// Get the log's public key.
     pub fn public_key(&self) -> &VerifyingKey {
         &self.verifying_key
@@ -90,10 +99,11 @@ impl CheckpointVerifier {
         }
 
         // Find a signature from the log
-        let log_sig = checkpoint
-            .signatures
-            .iter()
-            .find(|s| s.key_id == self.config.key_id || s.name.as_str() == self.config.key_name);
+        let log_sig = checkpoint.signatures.iter().find(|s| {
+            self.config
+                .verify_signature(s, checkpoint.checkpoint.to_body().as_bytes())
+                .is_ok()
+        });
 
         let log_sig = log_sig.ok_or_else(|| {
             Error::Config(format!(
@@ -104,10 +114,7 @@ impl CheckpointVerifier {
 
         // Verify the signature
         let body = checkpoint.checkpoint.to_body();
-        self.config
-            .verifying_key
-            .verify(body.as_bytes(), &log_sig.signature)
-            .map_err(|e| Error::Signing(format!("signature verification failed: {}", e)))?;
+        self.config.verify_signature(log_sig, body.as_bytes())?;
 
         Ok(())
     }
@@ -167,6 +174,10 @@ fn parse_vkey(vkey: &str) -> Result<(String, KeyId, VerifyingKey)> {
 
     let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)
         .map_err(|e| Error::Config(format!("invalid public key: {}", e)))?;
+
+    if verifying_key.is_weak() {
+        return Err(Error::Config("weak verification key".into()));
+    }
 
     // Compute and verify key ID
     let key_id = compute_key_id(&name, &verifying_key);

@@ -47,11 +47,8 @@ async fn rekor_submission_and_mode_isolation() {
     db.ensure_mode(Mode::Rekor).await.unwrap();
     db.ensure_mode(Mode::Rekor).await.unwrap();
     assert!(db.ensure_mode(Mode::Tessera).await.is_err());
-    let storage = TileStorage::new(
-        opendal::Operator::new(opendal::services::Memory::default())
-            .unwrap()
-            .finish(),
-    );
+    let storage =
+        TileStorage::new(opendal::Operator::new(opendal::services::Memory::default()).unwrap());
     let signer = Arc::new(CheckpointSigner::generate("test.log"));
     let (sequencer, task) = Sequencer::new(
         db.clone(),
@@ -319,11 +316,8 @@ async fn inclusion_paths_across_tile_boundaries() {
         merkle::{integrate::integrate, proof::generate_inclusion_proof},
         types::TreeSize,
     };
-    let storage = TileStorage::new(
-        opendal::Operator::new(opendal::services::Memory::default())
-            .unwrap()
-            .finish(),
-    );
+    let storage =
+        TileStorage::new(opendal::Operator::new(opendal::services::Memory::default()).unwrap());
     let leaves: Vec<_> = (0u64..1025)
         .map(|i| sigstore_merkle::hash_leaf(&i.to_be_bytes()))
         .collect();

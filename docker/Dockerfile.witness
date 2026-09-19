@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.90-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 WORKDIR /app
 
@@ -15,7 +15,7 @@ COPY src ./src
 COPY crates ./crates
 
 # Build release binary
-RUN cargo build --release --bin witness
+RUN cargo build --locked --release --bin witness
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -28,7 +28,9 @@ RUN apt-get update && apt-get install -y \
 COPY --from=builder /app/target/release/witness /usr/local/bin/witness
 
 # Create data directory
-RUN mkdir -p /data
+RUN groupadd --gid 10001 siglog && useradd --uid 10001 --gid siglog --no-create-home siglog \
+    && mkdir -p /data && chown siglog:siglog /data
+USER 10001:10001
 
 # Default environment variables
 ENV LISTEN_ADDR=0.0.0.0:8081

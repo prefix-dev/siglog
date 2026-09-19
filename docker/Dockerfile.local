@@ -1,5 +1,5 @@
 # Build stage for local development (no LiteFS)
-FROM rust:1.90-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 WORKDIR /app
 
@@ -15,7 +15,7 @@ COPY src ./src
 COPY crates ./crates
 
 # Build all release binaries
-RUN cargo build --release --bin siglog --bin witness --bin conda-monitor
+RUN cargo build --locked --release --workspace --bin siglog --bin witness --bin conda-monitor
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -33,7 +33,9 @@ COPY --from=builder /app/target/release/witness /usr/local/bin/witness
 COPY --from=builder /app/target/release/conda-monitor /usr/local/bin/conda-monitor
 
 # Create data directories
-RUN mkdir -p /data
+RUN groupadd --gid 10001 siglog && useradd --uid 10001 --gid siglog --no-create-home siglog \
+    && mkdir -p /data && chown siglog:siglog /data
+USER 10001:10001
 
 WORKDIR /data
 

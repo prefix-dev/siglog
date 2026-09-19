@@ -94,6 +94,10 @@ struct Args {
     #[arg(long, env = "EXTERNAL_WITNESSES")]
     external_witnesses: Option<String>,
 
+    /// Pinned public note keys for external witnesses (comma-separated).
+    #[arg(long, env = "EXTERNAL_WITNESS_KEYS")]
+    external_witness_keys: Option<String>,
+
     /// API key for authenticating write requests (optional).
     /// When set, write endpoints require an Authorization: Bearer <key> header.
     #[arg(long, env = "API_KEY")]
@@ -215,21 +219,29 @@ async fn main() -> anyhow::Result<()> {
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| {
                     let parts: Vec<&str> = s.trim().splitn(2, '=').collect();
-                    if parts.len() != 2 {
-                        panic!(
-                            "invalid external witness format: expected 'name=url', got '{}'",
-                            s
-                        );
-                    }
-                    let witness = worker::ExternalWitness::new(parts[0], parts[1]);
+                    anyhow::ensure!(
+                        parts.len() == 2,
+                        "invalid external witness format: expected name=url"
+                    );
+                    let key = args
+                        .external_witness_keys
+                        .as_deref()
+                        .unwrap_or("")
+                        .split(',')
+                        .map(str::trim)
+                        .find(|key| key.split('+').next() == Some(parts[0]))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("missing pinned public key for witness {}", parts[0])
+                        })?;
+                    let witness = worker::ExternalWitness::new(key, parts[1])?;
                     tracing::info!(
                         "External witness configured: {} -> {}",
                         witness.name,
                         witness.url
                     );
-                    witness
+                    Ok(witness)
                 })
-                .collect()
+                .collect::<anyhow::Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
