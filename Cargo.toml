@@ -24,6 +24,10 @@ name = "siglog"
 path = "src/main.rs"
 
 [[bin]]
+name = "siglog-import"
+path = "src/bin/import.rs"
+
+[[bin]]
 name = "witness"
 path = "src/bin/witness.rs"
 

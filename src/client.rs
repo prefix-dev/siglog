@@ -129,7 +129,7 @@ impl TileReader for LogClient {
         }
         let tile = HashTile::from_bytes(&data[..count * 32])?;
         let mut cache = self.tiles.lock().unwrap();
-        // ponytail: bounded per-request cache; use LRU only if eviction becomes costly.
+        // Bounded per-request cache; use LRU only if eviction becomes costly.
         if cache.len() >= 256 {
             cache.clear();
         }

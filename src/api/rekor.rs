@@ -454,7 +454,7 @@ async fn submit(
                 }));
             }
         }
-        // ponytail: poll published checkpoints; use worker notifications if write volume warrants it.
+        // Poll published checkpoints; use worker notifications if write volume warrants it.
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

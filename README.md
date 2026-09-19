@@ -215,6 +215,14 @@ export DATABASE_URL="sqlite:./witness.db"
 - Docker processes run as UID/GID `10001:10001`. Existing data volumes must be writable by that identity before upgrading. Filesystem object replacement is atomic.
 - CI audits dependencies. The only advisory exception is the unused `rsa` dependency in SQLx's optional MySQL lockfile graph; CI also checks that it is absent from the enabled runtime graph.
 
+## Bulk import
+
+For offline bootstrap of a fresh Tessera log from conda-forge repodata, see the
+[bulk import guide](docs/bulk-import.md). `conda-log-ingest --jsonl-out` exports
+normalized snapshots; `siglog-import --jsonl ...` builds the tree with concurrent
+uploads and content-checked resume. It refuses Rekor and nonempty logs and leaves
+checkpoint publication to the normal witness-aware server.
+
 ## Running a Witness
 
 A witness independently verifies and co-signs transparency log checkpoints. Running a witness helps ensure the log operator cannot present different views to different users.
