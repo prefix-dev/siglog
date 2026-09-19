@@ -96,7 +96,7 @@ fn canonical_entry(body: &[u8]) -> Result<Vec<u8>> {
             let der = decode(&cert.raw_bytes)?;
             let cert = Certificate::from_der(&der).map_err(invalid)?;
             (
-                cert.tbs_certificate.subject_public_key_info,
+                cert.tbs_certificate().subject_public_key_info().clone(),
                 json!({"x509Certificate": {"rawBytes": STANDARD.encode(der)}}),
             )
         }

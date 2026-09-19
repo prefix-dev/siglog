@@ -86,7 +86,7 @@ async fn check_duplicates(url: &str) {
     ));
     let row = db
         .connection()
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             db.connection().get_database_backend(),
             "SELECT COUNT(*) AS count FROM rekor_entries",
         ))

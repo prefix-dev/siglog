@@ -49,6 +49,8 @@ The test suite includes:
 
 ## Installation
 
+Requires Python 3.11 or newer. CI uses the versions in `uv.lock`.
+
 ### Using uv (recommended)
 
 ```bash

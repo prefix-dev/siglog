@@ -24,7 +24,6 @@ pub use prefix_tree::{LookupProof, PrefixTree, ProofNode};
 use sha2::{Digest, Sha256};
 pub use snapshot::snapshot_path;
 use std::collections::{HashMap, HashSet};
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -769,7 +768,7 @@ pub struct MemoryStats {
 fn compute_value_hash(indices: &[LogIndex]) -> IndexKey {
     let mut hasher = Sha256::new();
     for idx in indices {
-        hasher.write_all(&idx.value().to_be_bytes()).unwrap();
+        hasher.update(idx.value().to_be_bytes());
     }
     hasher.finalize().into()
 }

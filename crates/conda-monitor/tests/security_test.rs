@@ -241,7 +241,7 @@ async fn monitor_rolls_back_content_when_checkpoint_commit_fails() {
     assert_eq!(monitor.get_state("log").await.unwrap().unwrap().size, 0);
     let rows = db
         .connection()
-        .query_all(sea_orm::Statement::from_string(
+        .query_all_raw(sea_orm::Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             "SELECT * FROM content_index",
         ))
