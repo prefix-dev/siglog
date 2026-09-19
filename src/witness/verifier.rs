@@ -4,7 +4,6 @@ use crate::checkpoint::{CheckpointSignature, CosignedCheckpoint, KeyId};
 use crate::error::{Error, Result};
 use base64::Engine;
 use ed25519_dalek::VerifyingKey;
-use sha2::{Digest, Sha256};
 
 /// Ed25519 algorithm identifier for note format.
 const ALG_ED25519: u8 = 0x01;
@@ -32,10 +31,19 @@ impl LogConfig {
     /// Format: `name+hash_hex+base64(alg + pubkey)`
     /// Example: `example.com/log+deadbeef+AQIDBAUGBwg...`
     pub fn new(origin: String, vkey: &str) -> Result<Self> {
-        let (key_name, key_id, verifying_key) = parse_vkey(vkey)?;
+        let config = Self::new_witness(vkey)?;
+        let (_, alg, _, _) = parse_vkey(vkey)?;
+        if alg != ALG_ED25519 {
+            return Err(Error::Config("log keys must use plain Ed25519".into()));
+        }
+        Ok(Self { origin, ..config })
+    }
 
+    /// Pinned witness key; accepts plain note and cosignature/v1 keys.
+    pub fn new_witness(vkey: &str) -> Result<Self> {
+        let (key_name, _, key_id, verifying_key) = parse_vkey(vkey)?;
         Ok(Self {
-            origin,
+            origin: String::new(),
             vkey: vkey.to_string(),
             url: None,
             verifying_key,
@@ -52,11 +60,39 @@ impl LogConfig {
     }
 
     pub fn verify_signature(&self, signature: &CheckpointSignature, body: &[u8]) -> Result<()> {
-        if signature.key_id != self.key_id || signature.name.as_str() != self.key_name {
+        if signature.timestamp.is_some()
+            || signature.key_id != self.key_id
+            || signature.name.as_str() != self.key_name
+        {
             return Err(Error::Signing("signature key identity mismatch".into()));
         }
         self.verifying_key
             .verify_strict(body, &signature.signature)
+            .map_err(|e| Error::Signing(e.to_string()))
+    }
+
+    /// Verify a witness signature without allowing timestamped signatures as log signatures.
+    pub fn verify_cosignature(&self, signature: &CheckpointSignature, body: &[u8]) -> Result<()> {
+        use crate::checkpoint::signer::{compute_key_id_with_alg, cosignature_v1_message};
+        let alg = if signature.timestamp.is_some() {
+            0x04
+        } else {
+            0x01
+        };
+        let key_id = compute_key_id_with_alg(&self.key_name, &self.verifying_key, alg);
+        if signature.key_id != key_id || signature.name.as_str() != self.key_name {
+            return Err(Error::Signing("signature key identity mismatch".into()));
+        }
+        let message = match signature.timestamp {
+            Some(ts) => cosignature_v1_message(
+                ts,
+                std::str::from_utf8(body).map_err(|e| Error::Signing(e.to_string()))?,
+            )
+            .into_bytes(),
+            None => body.to_vec(),
+        };
+        self.verifying_key
+            .verify_strict(&message, &signature.signature)
             .map_err(|e| Error::Signing(e.to_string()))
     }
 
@@ -123,7 +159,7 @@ impl CheckpointVerifier {
 /// Parse a verification key string.
 ///
 /// Format: `name+hash_hex+base64(alg + pubkey)`
-fn parse_vkey(vkey: &str) -> Result<(String, KeyId, VerifyingKey)> {
+fn parse_vkey(vkey: &str) -> Result<(String, u8, KeyId, VerifyingKey)> {
     let parts: Vec<&str> = vkey.trim().splitn(3, '+').collect();
     if parts.len() != 3 {
         return Err(Error::Config(format!(
@@ -160,7 +196,7 @@ fn parse_vkey(vkey: &str) -> Result<(String, KeyId, VerifyingKey)> {
     }
 
     // Check algorithm byte
-    if key_data[0] != ALG_ED25519 {
+    if key_data[0] != ALG_ED25519 && key_data[0] != 0x04 {
         return Err(Error::Config(format!(
             "unsupported algorithm: expected {}, got {}",
             ALG_ED25519, key_data[0]
@@ -180,7 +216,8 @@ fn parse_vkey(vkey: &str) -> Result<(String, KeyId, VerifyingKey)> {
     }
 
     // Compute and verify key ID
-    let key_id = compute_key_id(&name, &verifying_key);
+    let key_id =
+        crate::checkpoint::signer::compute_key_id_with_alg(&name, &verifying_key, key_data[0]);
     if key_id.as_u32() != expected_hash {
         return Err(Error::Config(format!(
             "key hash mismatch: expected {:08x}, computed {:08x}",
@@ -189,25 +226,49 @@ fn parse_vkey(vkey: &str) -> Result<(String, KeyId, VerifyingKey)> {
         )));
     }
 
-    Ok((name, key_id, verifying_key))
-}
-
-/// Compute the key ID for a verifying key per Go's note format.
-fn compute_key_id(name: &str, key: &VerifyingKey) -> KeyId {
-    let mut hasher = Sha256::new();
-    hasher.update(name.as_bytes());
-    hasher.update(b"\n");
-    hasher.update([ALG_ED25519]);
-    hasher.update(key.as_bytes());
-    let hash = hasher.finalize();
-
-    KeyId::new([hash[0], hash[1], hash[2], hash[3]])
+    Ok((name, key_data[0], key_id, verifying_key))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::checkpoint::CheckpointSigner;
+
+    #[test]
+    fn cosignatures_are_verified_but_never_accepted_as_log_signatures() {
+        use crate::checkpoint::{Checkpoint, Origin};
+        use crate::types::TreeSize;
+        use sigstore_types::Sha256Hash;
+        let signer = CheckpointSigner::generate("witness");
+        let cp = Checkpoint::new(
+            Origin::new("log".into()).unwrap(),
+            TreeSize::new(1),
+            Sha256Hash::from_bytes([1; 32]),
+        );
+        let sig = signer.cosign_v1(&cp, 1234);
+        let body = cp.to_body();
+        let mut key_data = vec![0x04];
+        key_data.extend_from_slice(signer.public_key().as_bytes());
+        let vkey = format!(
+            "witness+{:08x}+{}",
+            signer.cosignature_v1_key_id().as_u32(),
+            base64::engine::general_purpose::STANDARD.encode(key_data)
+        );
+        assert!(LogConfig::new("log".into(), &vkey).is_err());
+        for key in [vkey, signer.verification_key()] {
+            let config = LogConfig::new_witness(&key).unwrap();
+            config.verify_cosignature(&sig, body.as_bytes()).unwrap();
+            assert!(config.verify_signature(&sig, body.as_bytes()).is_err());
+            let mut altered = sig.clone();
+            altered.timestamp = Some(1235);
+            assert!(config
+                .verify_cosignature(&altered, body.as_bytes())
+                .is_err());
+            assert!(config
+                .verify_cosignature(&sig, b"different body\n")
+                .is_err());
+        }
+    }
 
     #[test]
     fn test_parse_vkey_roundtrip() {
@@ -236,7 +297,7 @@ mod tests {
         );
 
         // Parse and verify
-        let (parsed_name, parsed_id, parsed_key) = parse_vkey(&vkey).unwrap();
+        let (parsed_name, _, parsed_id, parsed_key) = parse_vkey(&vkey).unwrap();
         assert_eq!(parsed_name, name);
         assert_eq!(parsed_id.as_u32(), signer.key_id().as_u32());
         assert_eq!(parsed_key.as_bytes(), pubkey.as_bytes());

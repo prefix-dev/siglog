@@ -98,6 +98,10 @@ struct Args {
     #[arg(long, env = "EXTERNAL_WITNESS_KEYS")]
     external_witness_keys: Option<String>,
 
+    /// Minimum external witness signatures required (default: all).
+    #[arg(long, env = "WITNESS_QUORUM")]
+    witness_quorum: Option<usize>,
+
     /// API key for authenticating write requests (optional).
     /// When set, write endpoints require an Authorization: Bearer <key> header.
     #[arg(long, env = "API_KEY")]
@@ -137,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     tracing::info!("Starting Siglog");
+    siglog::checkpoint::Origin::new(args.origin.clone())?;
     tracing::info!("Origin: {}", args.origin);
     tracing::info!("Listen: {}", args.listen);
 
@@ -247,6 +252,19 @@ async fn main() -> anyhow::Result<()> {
         };
     tracing::info!("{} external witnesses configured", external_witnesses.len());
 
+    anyhow::ensure!(
+        args.witness_quorum.unwrap_or(external_witnesses.len()) <= external_witnesses.len(),
+        "WITNESS_QUORUM exceeds configured external witnesses"
+    );
+    let mut witness_names = std::collections::HashSet::new();
+    let mut witness_keys = std::collections::HashSet::new();
+    for witness in &external_witnesses {
+        anyhow::ensure!(
+            witness_names.insert(&witness.name) && witness_keys.insert(witness.public_key()),
+            "external witnesses must have distinct names and public keys"
+        );
+    }
+
     // Create shutdown channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -259,7 +277,7 @@ async fn main() -> anyhow::Result<()> {
     let (sequencer, sequencer_task) = Sequencer::new(db.clone(), sequencer_config);
 
     // Spawn sequencer
-    tokio::spawn(sequencer_task);
+    let sequencer_handle = tokio::spawn(sequencer_task);
 
     // Configure workers
     let worker_config = WorkerConfig {
@@ -267,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
         integration_batch_size: 1024,
         checkpoint_interval: Duration::from_secs(args.checkpoint_interval),
         origin: args.origin.clone(),
+        witness_quorum: args.witness_quorum,
     };
 
     // Initialize vindex if enabled (before spawning workers)
@@ -287,7 +306,19 @@ async fn main() -> anyhow::Result<()> {
                 wal_path,
                 expected_tree_size
             );
-            vindex::VerifiableIndex::with_wal(map_fn, wal_path, expected_tree_size)?
+            match vindex::VerifiableIndex::with_wal(map_fn.clone(), wal_path, expected_tree_size) {
+                Ok(vi) => vi,
+                Err(e) => {
+                    tracing::warn!("Vindex recovery failed ({e}); rebuilding from entry bundles");
+                    vindex::VerifiableIndex::rebuild_from_storage(
+                        map_fn,
+                        wal_path,
+                        expected_tree_size,
+                        &storage,
+                    )
+                    .await?
+                }
+            }
         } else {
             if expected_tree_size > 0 {
                 anyhow::bail!(
@@ -309,7 +340,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Spawn integration worker (with optional vindex)
-    tokio::spawn(worker::run_integration_worker(
+    let integration_handle = tokio::spawn(worker::run_integration_worker(
         db.clone(),
         storage.clone(),
         worker_config.clone(),
@@ -318,7 +349,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Spawn checkpoint worker
-    tokio::spawn(worker::run_checkpoint_worker(
+    let checkpoint_handle = tokio::spawn(worker::run_checkpoint_worker(
         db.clone(),
         storage.clone(),
         signer.clone(),
@@ -349,6 +380,14 @@ async fn main() -> anyhow::Result<()> {
             .finish()
             .expect("failed to create rate limit config"),
     );
+    let limiter = rate_limit_config.limiter().clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            limiter.retain_recent();
+        }
+    });
     let governor_layer =
         GovernorLayer::new(rate_limit_config).error_handler(rate_limit::rate_limit_error_handler);
     tracing::info!(
@@ -375,11 +414,22 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Vindex API enabled at /vindex/lookup/*");
     }
 
-    let app = app.with_state(state).layer(governor_layer).layer(
-        tower_http::trace::TraceLayer::new_for_http()
-            .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO))
-            .on_response(tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO)),
-    );
+    let app = app
+        .with_state(state)
+        .layer(governor_layer)
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(30),
+        ))
+        .layer(
+            tower_http::trace::TraceLayer::new_for_http()
+                .make_span_with(
+                    tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO),
+                )
+                .on_response(
+                    tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO),
+                ),
+        );
 
     // Start server
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
@@ -400,12 +450,21 @@ async fn main() -> anyhow::Result<()> {
 
     // Handle shutdown
     let shutdown_signal = async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        siglog::shutdown::shutdown_signal().await;
         tracing::info!("Shutdown signal received");
         let _ = shutdown_tx.send(true);
     };
+
+    let mut supervisor_shutdown = shutdown_rx;
+    tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            _ = supervisor_shutdown.changed() => (),
+            r = sequencer_handle => { tracing::error!("sequencer exited: {r:?}"); std::process::exit(1); },
+            r = integration_handle => { tracing::error!("integration worker exited: {r:?}"); std::process::exit(1); },
+            r = checkpoint_handle => { tracing::error!("checkpoint worker exited: {r:?}"); std::process::exit(1); },
+        }
+    });
 
     axum::serve(
         listener,

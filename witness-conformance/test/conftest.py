@@ -61,7 +61,7 @@ def pytest_generate_tests(metafunc):
                 pytest.fail(f"Failed to load test case {json_file}: {e}")
 
         if not test_cases:
-            pytest.skip("No test cases found in test/cases directory")
+            pytest.fail("No test cases found in test/cases directory")
 
         metafunc.parametrize("test_case", test_cases, ids=test_ids)
 
@@ -115,12 +115,7 @@ def log_key_pair(request):
     """Generate or get a log key pair and configuration."""
     config = request.config.getoption("--log-config")
     if config:
-        # If user provided config, we can't get the private key
-        # so we'll generate a new one (this won't match, but it's best effort)
-        from cryptography.hazmat.primitives.asymmetric import ed25519
-        origin = config.split("=")[0]
-        log_key = ed25519.Ed25519PrivateKey.generate()
-        return log_key, config, origin
+        pytest.fail("--log-config cannot be used without its signing key; omit it to generate a matching test key pair")
 
     # Generate a test log config with private key
     from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -192,9 +187,11 @@ def witness_client(entrypoint: str, port: int, private_key: str,
         log_config=log_config,
     )
 
-    client.start()
-    yield client
-    client.stop()
+    try:
+        client.start()
+        yield client
+    finally:
+        client.stop()
 
 
 @pytest.fixture

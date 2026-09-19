@@ -27,9 +27,13 @@ pub struct ExternalWitness {
 }
 
 impl ExternalWitness {
+    pub fn public_key(&self) -> [u8; 32] {
+        self.key.public_key().to_bytes()
+    }
+
     /// Create a new external witness configuration.
     pub fn new(verification_key: &str, url: impl Into<String>) -> Result<Self> {
-        let key = crate::witness::LogConfig::new(String::new(), verification_key)?;
+        let key = crate::witness::LogConfig::new_witness(verification_key)?;
         Ok(Self {
             name: key.key_name().to_string(),
             url: url.into(),
@@ -73,6 +77,8 @@ pub struct WorkerConfig {
     pub checkpoint_interval: Duration,
     /// Log origin string.
     pub origin: String,
+    /// Required external witnesses; None requires all configured witnesses.
+    pub witness_quorum: Option<usize>,
 }
 
 impl Default for WorkerConfig {
@@ -82,6 +88,7 @@ impl Default for WorkerConfig {
             integration_batch_size: 1024,
             checkpoint_interval: Duration::from_secs(1),
             origin: "example.com/log".to_string(),
+            witness_quorum: None,
         }
     }
 }
@@ -228,6 +235,12 @@ async fn run_integration_cycle(
         result.root_hash.to_hex()
     );
 
+    if let Some(vi) = vindex {
+        let vi = Arc::clone(vi);
+        tokio::task::spawn_blocking(move || vi.maybe_snapshot())
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))??;
+    }
     Ok(())
 }
 
@@ -334,7 +347,7 @@ pub async fn run_checkpoint_worker(
                 }
             }
             _ = tokio::time::sleep(config.checkpoint_interval) => {
-                if let Err(e) = publish_checkpoint(&db, &storage, &signer, &witnesses, &external_witnesses, &client, &origin, &mut witness_state, &mut last_published).await {
+                if let Err(e) = publish_checkpoint(&db, &storage, &signer, &witnesses, &external_witnesses, config.witness_quorum, &client, &origin, &mut witness_state, &mut last_published).await {
                     tracing::error!("Checkpoint publish error: {}", e);
                 }
             }
@@ -349,6 +362,7 @@ async fn publish_checkpoint(
     signer: &CheckpointSigner,
     witnesses: &[Arc<CheckpointSigner>],
     external_witnesses: &[ExternalWitness],
+    witness_quorum: Option<usize>,
     client: &reqwest::Client,
     origin: &Origin,
     witness_state: &mut ExternalWitnessState,
@@ -392,10 +406,14 @@ async fn publish_checkpoint(
 
     // Add in-process witness signatures
     for witness in witnesses {
-        cosigned.add_signature(witness);
+        cosigned
+            .signatures
+            .push(witness.cosign_now(&cosigned.checkpoint)?);
     }
 
     let mut external_signature_count = 0usize;
+    let mut signed_keys = std::collections::HashSet::new();
+    let mut signed_names = std::collections::HashSet::new();
 
     // Call external witnesses and merge their signatures
     for ext_witness in external_witnesses {
@@ -448,7 +466,11 @@ async fn publish_checkpoint(
                     );
                 } else {
                     witness_state.set_size(&ext_witness.url, new_size);
-                    external_signature_count += 1;
+                    if signed_keys.insert(ext_witness.public_key())
+                        && signed_names.insert(&ext_witness.name)
+                    {
+                        external_signature_count += 1;
+                    }
                     tracing::debug!("Got signature from external witness: {}", ext_witness.name);
                 }
             }
@@ -462,7 +484,7 @@ async fn publish_checkpoint(
         }
     }
 
-    if external_signature_count < external_witnesses.len() {
+    if external_signature_count < witness_quorum.unwrap_or(external_witnesses.len()) {
         tracing::warn!(
             "Not publishing checkpoint size {}: got {}/{} external witness signatures",
             new_size,
@@ -586,7 +608,7 @@ async fn call_external_witness(
     let signature = CheckpointSignature::from_line(body.trim())?;
     witness
         .key
-        .verify_signature(&signature, checkpoint.checkpoint.to_body().as_bytes())?;
+        .verify_cosignature(&signature, checkpoint.checkpoint.to_body().as_bytes())?;
     Ok(body)
 }
 
@@ -694,6 +716,74 @@ mod tests {
         ])
     }
 
+    #[tokio::test]
+    async fn quorum_requires_distinct_verified_witnesses() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.run_migrations().await.unwrap();
+        let storage =
+            TileStorage::new(opendal::Operator::new(opendal::services::Memory::default()).unwrap());
+        let log = CheckpointSigner::generate("log");
+        let witness = CheckpointSigner::generate("witness");
+        let origin = Origin::new("log".into()).unwrap();
+        let cp = Checkpoint::new(origin.clone(), TreeSize::new(0), empty_root_hash());
+        let good = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(witness.cosign_v1(&cp, 1234).to_line()),
+            )
+            .mount(&good)
+            .await;
+        let bad = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&bad)
+            .await;
+        let good_config = ExternalWitness::new(&witness.verification_key(), good.uri()).unwrap();
+        let offline = ExternalWitness::new(
+            &CheckpointSigner::generate("offline").verification_key(),
+            bad.uri(),
+        )
+        .unwrap();
+        let client = reqwest::Client::new();
+        let mut state = ExternalWitnessState::default();
+        let mut published = LastPublished::default();
+        for witnesses in [
+            vec![good_config.clone(), offline.clone()],
+            vec![good_config.clone(), good_config.clone()],
+        ] {
+            publish_checkpoint(
+                &db,
+                &storage,
+                &log,
+                &[],
+                &witnesses,
+                Some(2),
+                &client,
+                &origin,
+                &mut state,
+                &mut published,
+            )
+            .await
+            .unwrap();
+            assert!(storage.read_checkpoint().await.unwrap().is_none());
+        }
+        publish_checkpoint(
+            &db,
+            &storage,
+            &log,
+            &[],
+            &[good_config, offline],
+            Some(1),
+            &client,
+            &origin,
+            &mut state,
+            &mut published,
+        )
+        .await
+        .unwrap();
+        assert!(storage.read_checkpoint().await.unwrap().is_some());
+    }
+
     /// Create a signature line in the note format for testing.
     fn make_signature_line(signer: &CheckpointSigner, body: &str) -> String {
         let signature = signer.signing_key_ref().sign(body.as_bytes());
@@ -701,6 +791,7 @@ mod tests {
             name: signer.name().clone(),
             key_id: signer.key_id().clone(),
             signature,
+            timestamp: None,
         };
         sig.to_line()
     }
