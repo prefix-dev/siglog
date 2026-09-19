@@ -243,6 +243,51 @@ async fn corruption_and_mutation_fail_without_committing() {
 }
 
 #[tokio::test]
+async fn postgres_import_rollback_resume_and_append() {
+    use sea_orm::ConnectionTrait;
+    let Ok(url) = std::env::var("SIGLOG_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let admin = Database::connect(&url).await.unwrap();
+    let name = format!("siglog_import_{}", rand::random::<u64>());
+    admin
+        .connection()
+        .execute_unprepared(&format!("CREATE DATABASE {name}"))
+        .await
+        .unwrap();
+    let mut url = reqwest::Url::parse(&url).unwrap();
+    url.set_path(&format!("/{name}"));
+    let db = Database::connect(url.as_str()).await.unwrap();
+    db.run_migrations().await.unwrap();
+    let storage = storage();
+    let data = data(300);
+    let input = input(&data);
+    let interrupted =
+        entries(&data[..256]).chain(std::iter::once(Err(Error::Internal("stop".into()))));
+    assert!(
+        bulk_import(&db, &storage, &input, &config(false), interrupted)
+            .await
+            .is_err()
+    );
+    assert_eq!(db.get_log_state().await.unwrap().next_index.value(), 0);
+    let imported = bulk_import(&db, &storage, &input, &config(true), entries(&data))
+        .await
+        .unwrap();
+    assert_eq!(imported.root_hash, root(&data));
+    let sequenced = db
+        .sequence_entries(vec![Entry::new("after import")])
+        .await
+        .unwrap();
+    assert_eq!(sequenced[0].as_ref().unwrap().index().value(), 300);
+    db.connection().clone().close().await.unwrap();
+    admin
+        .connection()
+        .execute_unprepared(&format!("DROP DATABASE {name}"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn rekor_and_published_storage_are_untouched() {
     let db = database().await;
     let storage = storage();

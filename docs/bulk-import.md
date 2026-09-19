@@ -118,14 +118,15 @@ as described in the main README. Then:
 export LOG_MODE=tessera
 # Optional: rebuild vindex from the imported entry bundles on first startup.
 export VINDEX_ENABLED=true
-export VINDEX_KEY_FIELD=sha256
+export VINDEX_KEY_FIELD=filename
 export VINDEX_WAL_PATH="$PWD/conda-vindex.wal"
 ./target/release/siglog
 ```
 
 Choose vindex limits appropriate to the dataset (`VINDEX_MAX_KEYS` and
 `VINDEX_MAX_INDICES_PER_KEY`). The index remains memory-resident and its default
-capacity may be too small for all conda-forge artifacts. You can leave vindex
+capacity may be too small for all conda-forge artifacts. The filename index is
+required by `conda-log-verify` for candidate discovery. You can leave vindex
 disabled to test large log ingestion first. The existing server recovery path
 builds and snapshots it on startup; the importer never deletes an existing index.
 
