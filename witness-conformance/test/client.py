@@ -4,7 +4,11 @@ Witness client wrapper for conformance testing.
 This module provides a wrapper around witness binaries for testing purposes.
 """
 
+import base64
+import hashlib
 import subprocess
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import time
 import signal
 import requests
@@ -46,7 +50,7 @@ class WitnessClient:
             private_key: Witness private key in Note format
             log_config: Log configuration in format "origin=vkey"
         """
-        self.entrypoint = Path(entrypoint)
+        self.entrypoint = Path(entrypoint).resolve()
         self.port = port
         self.database_url = database_url or "sqlite::memory:"
         self.private_key = private_key
@@ -166,6 +170,9 @@ class WitnessClient:
                 timeout=5.0,
             )
 
+            # A 200 must contain a valid C2SP cosignature, not just an em dash.
+            if response.status_code == 200:
+                self.verify_cosignature(response.text, checkpoint)
             return {
                 "status_code": response.status_code,
                 "body": response.text,
@@ -173,6 +180,22 @@ class WitnessClient:
             }
         except requests.exceptions.RequestException as e:
             raise WitnessError(f"Request failed: {e}")
+
+    def verify_cosignature(self, line: str, checkpoint: str) -> None:
+        """Independent Ed25519 verification of the C2SP wire response."""
+        _, _, name, _, seed = self.private_key.split("+", 4)
+        key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(seed)[1:]).public_key()
+        marker, signer, encoded = line.strip().split(" ")
+        assert marker == "—" and signer == name, "wrong cosigner identity"
+        blob = base64.b64decode(encoded, validate=True)
+        assert len(blob) == 76, "expected timestamped cosignature/v1 (76 bytes)"
+        expected_id = hashlib.sha256(name.encode() + b"\n\x04" + key.public_bytes_raw()).digest()[:4]
+        assert blob[:4] == expected_id, "wrong cosignature key ID"
+        timestamp = int.from_bytes(blob[4:12], "big")
+        assert abs(time.time() - timestamp) < 300, "cosignature timestamp is not current"
+        body = checkpoint.split("\n\n", 1)[0] + "\n"
+        message = f"cosignature/v1\ntime {timestamp}\n{body}".encode()
+        key.verify(blob[12:], message)
 
     def health_check(self) -> bool:
         """

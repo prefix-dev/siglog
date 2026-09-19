@@ -3,7 +3,9 @@
 use crate::error::{Error, Result};
 use crate::witness::WitnessedState;
 use sea_orm::{
-    prelude::*, sea_query::Expr, ActiveValue, ConnectionTrait, DatabaseConnection, TransactionTrait,
+    prelude::*,
+    sea_query::{Expr, OnConflict},
+    ActiveValue, ConnectionTrait, DatabaseConnection,
 };
 use sigstore_types::Sha256Hash;
 use std::sync::Arc;
@@ -51,25 +53,6 @@ impl WitnessStateStore {
         // Initialize with empty tree state
         let empty_root = empty_root_hash();
 
-        // Use a transaction to handle race conditions
-        let txn = self.conn.begin().await?;
-
-        // Check again inside transaction
-        let existing = witness_state::Entity::find_by_id(origin.to_string())
-            .one(&txn)
-            .await?;
-
-        if let Some(model) = existing {
-            txn.rollback().await?;
-            let root_hash = Sha256Hash::try_from_slice(&model.root_hash)
-                .map_err(|e| Error::Internal(format!("invalid root hash in db: {}", e)))?;
-            return Ok(WitnessedState {
-                origin: model.origin,
-                size: model.size as u64,
-                root_hash,
-            });
-        }
-
         // Insert new state
         let model = witness_state::ActiveModel {
             origin: ActiveValue::Set(origin.to_string()),
@@ -79,14 +62,19 @@ impl WitnessStateStore {
             updated_at: ActiveValue::Set(chrono::Utc::now().into()),
         };
 
-        witness_state::Entity::insert(model).exec(&txn).await?;
-        txn.commit().await?;
-
-        Ok(WitnessedState {
-            origin: origin.to_string(),
-            size: 0,
-            root_hash: empty_root,
-        })
+        // Let the database arbitrate concurrent first requests without a
+        // read-to-write lock upgrade (SQLITE_BUSY) or duplicate-key error.
+        witness_state::Entity::insert(model)
+            .on_conflict(
+                OnConflict::column(witness_state::Column::Origin)
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .exec_without_returning(&*self.conn)
+            .await?;
+        self.get(origin)
+            .await?
+            .ok_or_else(|| Error::Internal("witness state missing after initialization".into()))
     }
 
     /// Commit only if the state used to verify the proof is still current.

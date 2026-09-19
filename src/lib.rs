@@ -16,6 +16,7 @@ pub mod merkle;
 pub mod migration;
 pub mod monitor;
 pub mod sequencer;
+pub mod shutdown;
 pub mod storage;
 pub mod types;
 pub mod vindex;

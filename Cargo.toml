@@ -31,7 +31,8 @@ path = "src/bin/witness.rs"
 # Web framework
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout"] }
+crc32fast = "1.5"
 tower = "0.5"
 tower_governor = "0.8"
 
@@ -88,3 +89,6 @@ tempfile = "3"
 portpicker = "0.1"
 wiremock = "0.6"
 tower = "0.5"
+
+[profile.release]
+overflow-checks = true

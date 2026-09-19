@@ -20,7 +20,6 @@ pub use verifier::{CheckpointVerifier, LogConfig};
 
 use crate::checkpoint::{CheckpointSignature, CheckpointSigner, CosignedCheckpoint};
 use crate::error::{Error, Result};
-use ed25519_dalek::Signer;
 use sea_orm::DatabaseConnection;
 use sigstore_types::Sha256Hash;
 use std::sync::Arc;
@@ -150,16 +149,7 @@ impl Witness {
             ));
         }
 
-        // 8. Create cosignature
-        let body = checkpoint.checkpoint.to_body();
-        let signature = self.signer.signing_key_ref().sign(body.as_bytes());
-        let cosig = CheckpointSignature {
-            name: self.signer.name().clone(),
-            key_id: self.signer.key_id().clone(),
-            signature,
-        };
-
-        // 9. Update state
+        // Persist the verified state before issuing a cosignature.
         if !self
             .state_store
             .update(&state, new_size, new_root, &request.checkpoint)
@@ -174,7 +164,9 @@ impl Witness {
             return Err(WitnessError::Conflict(current.size));
         }
 
-        Ok(cosig)
+        self.signer
+            .cosign_now(&checkpoint.checkpoint)
+            .map_err(|e| WitnessError::Internal(e.to_string()))
     }
 
     /// Get the current witnessed state for a log.

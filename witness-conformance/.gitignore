@@ -45,3 +45,5 @@ conformance-report.json
 *.swo
 *~
 .DS_Store
+.test_log_info
+results.xml

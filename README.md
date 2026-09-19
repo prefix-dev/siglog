@@ -86,13 +86,33 @@ cargo build --release
 | `API_KEY` | Bearer token required for write requests in either mode | Required unless `ALLOW_PUBLIC_WRITES=true` |
 | `ALLOW_PUBLIC_WRITES` | Allow unauthenticated writes for local development | `false` |
 | `EXTERNAL_WITNESSES` | Comma-separated `name=url` witness endpoints | - |
-| `EXTERNAL_WITNESS_KEYS` | Comma-separated pinned public note keys, one for each external witness name | Required with external witnesses |
+| `EXTERNAL_WITNESS_KEYS` | Comma-separated pinned public note keys (Ed25519 or cosignature/v1), one per external witness name | Required with external witnesses |
+| `WITNESS_QUORUM` | Minimum distinct external witness signatures required to publish | All configured witnesses |
 | `CHECKPOINT_INTERVAL` | Checkpoint frequency (seconds) | `1` |
 | `BATCH_MAX_SIZE` | Max entries per batch | `256` |
 | `BATCH_MAX_AGE_MS` | Max batch age (ms) | `1000` |
 | `VINDEX_ENABLED` | Enable verifiable index | `false` |
 | `VINDEX_KEY_FIELD` | JSON field for key extraction | `name` |
 | `VINDEX_WAL_PATH` | WAL path for persistent vindex recovery | Required when enabling vindex on a non-empty log |
+| `VINDEX_SNAPSHOT_INTERVAL` | Entries between vindex snapshots/WAL compaction (`0` disables) | `100000` |
+
+Witnesses and monitors emit timestamped C2SP `cosignature/v1` signatures.
+The publisher verifies signatures against pinned keys before counting the quorum;
+legacy plain Ed25519 witness signatures remain accepted. Log signatures remain
+plain Ed25519. External witnesses must have distinct names and public keys.
+
+The vindex reads legacy v2 WALs and writes CRC32-protected v3 records. Snapshots
+bound WAL growth and replay time, not the in-memory index size. Missing, corrupt,
+or incomplete index state is rebuilt from entry bundles; incomplete bundles fail
+startup. Back up the database and tile storage together.
+
+The server supervises its background workers, expires idle rate-limit buckets,
+and times out HTTP requests after 30 seconds. Server, witness, and monitor handle
+SIGTERM as well as Ctrl+C. Client IPs still come from the connection, not untrusted
+forwarding headers.
+
+The [witness conformance suite](witness-conformance/README.md) runs in CI, alongside
+Rust security tests and the Go Rekor interoperability checks.
 
 #### Witness Server (`witness`)
 

@@ -68,6 +68,27 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+  witness-conformance:
+    name: Witness C2SP conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+      - run: cargo build --locked --bin witness
+      - name: Verify witness protocol and cosignatures
+        working-directory: witness-conformance
+        run: uv run --locked pytest --entrypoint=../target/debug/witness -v --junitxml=results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: witness-conformance-results
+          path: witness-conformance/results.xml
+
   test:
     name: Test
     runs-on: ubuntu-latest

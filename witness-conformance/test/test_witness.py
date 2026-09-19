@@ -125,6 +125,55 @@ def test_witness_conformance(witness_client: WitnessClient, log_signer, test_cas
         )
 
 
+def test_cosignature_verifier_rejects_tampering(witness_client, log_signer):
+    from cryptography.exceptions import InvalidSignature
+
+    checkpoint = log_signer.sign_checkpoint(1, compute_root_hash(1))
+    response = witness_client.add_checkpoint(0, [], checkpoint)
+    assert response["status_code"] == 200
+    line = response["body"]
+    prefix, encoded = line.strip().rsplit(" ", 1)
+    blob = base64.b64decode(encoded)
+    # Key ID, timestamp and signature must all be checked.
+    for offset in (0, 11, 12):
+        tampered = bytearray(blob)
+        tampered[offset] ^= 1
+        with pytest.raises((AssertionError, InvalidSignature)):
+            witness_client.verify_cosignature(prefix + " " + base64.b64encode(tampered).decode(), checkpoint)
+    with pytest.raises((AssertionError, InvalidSignature)):
+        witness_client.verify_cosignature(line, checkpoint.replace("\n1\n", "\n2\n"))
+    with pytest.raises(AssertionError):
+        witness_client.verify_cosignature("— wrong-name " + encoded, checkpoint)
+    with pytest.raises(AssertionError):
+        witness_client.verify_cosignature(prefix + " " + base64.b64encode(blob[:4] + blob[12:]).decode(), checkpoint)
+
+
+def test_restart_preserves_split_view_protection(witness_client, log_signer):
+    checkpoint = log_signer.sign_checkpoint(1, compute_root_hash(1))
+    assert witness_client.add_checkpoint(0, [], checkpoint)["status_code"] == 200
+    witness_client.stop()
+    witness_client.start()
+    assert witness_client.add_checkpoint(1, [], checkpoint)["status_code"] == 200
+    fork = log_signer.sign_checkpoint(1, base64.b64encode(b"x" * 32).decode())
+    assert witness_client.add_checkpoint(1, [], fork)["status_code"] == 422
+    assert witness_client.add_checkpoint(0, [], fork)["status_code"] == 409
+
+
+def test_concurrent_conflicting_checkpoints(witness_client, log_signer):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    barrier = Barrier(2)
+    checkpoints = [log_signer.sign_checkpoint(1, base64.b64encode(bytes([i]) * 32).decode()) for i in (1, 2)]
+    def submit(checkpoint):
+        barrier.wait(timeout=5)
+        return witness_client.add_checkpoint(0, [], checkpoint)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(submit, checkpoints))
+    assert sum(r["status_code"] == 200 for r in responses) == 1, responses
+    assert all(r["status_code"] in (200, 409) for r in responses), responses
+
+
 def test_health_check(witness_client: WitnessClient):
     """Test that the health check endpoint works."""
     assert witness_client.health_check(), "Health check failed"
@@ -190,7 +239,7 @@ def test_conflict_detection(witness_client: WitnessClient, log_signer):
     )
 
     # Body should contain the actual size (1)
-    assert "1" in response2["body"], (
+    assert response2["body"].strip() == "1", (
         f"Expected body to contain actual size '1' but got: {response2['body']}"
     )
 

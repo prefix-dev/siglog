@@ -12,7 +12,6 @@ use crate::witness::{
     WitnessStateStore, WitnessedState,
 };
 use async_trait::async_trait;
-use ed25519_dalek::Signer;
 use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
 use std::sync::Arc;
 
@@ -219,12 +218,7 @@ impl<M: Monitor> MonitoringWitness<M> {
             return Err(WitnessError::Conflict(state.size).into());
         }
         txn.commit().await.map_err(internal)?;
-        let signature = self.signer.signing_key_ref().sign(cp.to_body().as_bytes());
-        Ok(CheckpointSignature {
-            name: self.signer.name().clone(),
-            key_id: self.signer.key_id().clone(),
-            signature,
-        })
+        self.signer.cosign_now(cp).map_err(internal)
     }
 
     pub async fn get_state(&self, origin: &str) -> Result<Option<WitnessedState>> {
