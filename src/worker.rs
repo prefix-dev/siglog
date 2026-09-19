@@ -23,15 +23,18 @@ pub struct ExternalWitness {
     pub name: String,
     /// URL of the witness service (e.g., "http://localhost:8081").
     pub url: String,
+    key: crate::witness::LogConfig,
 }
 
 impl ExternalWitness {
     /// Create a new external witness configuration.
-    pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
+    pub fn new(verification_key: &str, url: impl Into<String>) -> Result<Self> {
+        let key = crate::witness::LogConfig::new(String::new(), verification_key)?;
+        Ok(Self {
+            name: key.key_name().to_string(),
             url: url.into(),
-        }
+            key,
+        })
     }
 }
 
@@ -192,14 +195,10 @@ async fn run_integration_cycle(
     // Index entries in vindex if enabled
     if let Some(vi) = vindex {
         for entry in &pending {
-            if let Err(e) = vi.index_entry(entry.index, entry.data.as_bytes()) {
-                tracing::warn!("Failed to index entry {}: {}", entry.index.value(), e);
-            }
+            vi.index_entry(entry.index, entry.data.as_bytes())?;
         }
         // Flush vindex WAL periodically (if using WAL)
-        if let Err(e) = vi.flush() {
-            tracing::warn!("Failed to flush vindex WAL: {}", e);
-        }
+        vi.flush()?;
         tracing::debug!(
             "Indexed {} entries in vindex, total keys: {}",
             pending.len(),
@@ -257,20 +256,26 @@ async fn write_entry_bundles(
     for (bundle_idx, entries) in bundles {
         let partial = crate::api::paths::partial_tile_size(0, bundle_idx, to);
 
-        // Load existing bundle if partial
-        let mut bundle = if partial > 0 {
-            let existing_partial = crate::api::paths::partial_tile_size(0, bundle_idx, from);
-            if existing_partial > 0 {
-                storage
-                    .read_entry_bundle(
-                        TileIndex::new(bundle_idx),
-                        PartialSize::new(existing_partial),
-                    )
-                    .await?
-                    .unwrap_or_default()
-            } else {
-                EntryBundle::new()
+        // Preserve the old prefix even when this batch completes the bundle.
+        let existing_partial = if bundle_idx == from / ENTRY_BUNDLE_WIDTH {
+            (from % ENTRY_BUNDLE_WIDTH) as u8
+        } else {
+            0
+        };
+        let mut bundle = if existing_partial > 0 {
+            let bundle = storage
+                .read_entry_bundle(
+                    TileIndex::new(bundle_idx),
+                    PartialSize::new(existing_partial),
+                )
+                .await?
+                .ok_or_else(|| Error::Internal("missing previous entry bundle".into()))?;
+            if bundle.len() != existing_partial as usize {
+                return Err(Error::Internal(
+                    "incorrect previous entry bundle length".into(),
+                ));
             }
+            bundle
         } else {
             EntryBundle::new()
         };
@@ -313,7 +318,10 @@ pub async fn run_checkpoint_worker(
     );
 
     let origin = Origin::new(config.origin.clone()).expect("invalid log origin");
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("HTTP client initialization failed");
     let mut witness_state = ExternalWitnessState::default();
     let mut last_published = LastPublished::default();
 
@@ -497,7 +505,11 @@ fn add_external_signature_line(
         )));
     }
 
-    if !cosigned.has_signature_from(&sig.name) {
+    if !cosigned.signatures.iter().any(|existing| {
+        existing.name == sig.name
+            && existing.key_id == sig.key_id
+            && existing.signature == sig.signature
+    }) {
         cosigned.signatures.push(sig);
     }
 
@@ -544,10 +556,11 @@ async fn call_external_witness(
         .await
         .map_err(|e| crate::error::Error::Config(format!("witness request failed: {}", e)))?;
 
-    if response.status() == reqwest::StatusCode::CONFLICT {
-        // Parse the conflict response to get the witness's current size
-        // Per C2SP spec: response body is just the size followed by newline
-        let body = response.text().await.unwrap_or_default();
+    let status = response.status();
+    let body = String::from_utf8(crate::client::bounded_body(response, 4096).await?)
+        .map_err(|e| Error::InvalidEntry(e.to_string()))?;
+    if status == reqwest::StatusCode::CONFLICT {
+        // A conflict is only a retry hint, never evidence of witnessing.
         if let Ok(size) = body.trim().parse::<u64>() {
             witness_state.set_size(&witness.url, size);
             tracing::debug!(
@@ -562,9 +575,7 @@ async fn call_external_witness(
         )));
     }
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
         return Err(crate::error::Error::Config(format!(
             "witness returned {}: {}",
             status,
@@ -572,11 +583,11 @@ async fn call_external_witness(
         )));
     }
 
-    // Return the signature line
-    response
-        .text()
-        .await
-        .map_err(|e| crate::error::Error::Config(format!("failed to read witness response: {}", e)))
+    let signature = CheckpointSignature::from_line(body.trim())?;
+    witness
+        .key
+        .verify_signature(&signature, checkpoint.checkpoint.to_body().as_bytes())?;
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -589,8 +600,90 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[tokio::test]
+    async fn indexing_failure_does_not_advance_integration() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.run_migrations().await.unwrap();
+        let body = serde_json::json!({"keys": (0..256).map(|i| i.to_string()).collect::<Vec<_>>()});
+        db.sequence_entries(vec![
+            crate::types::Entry::new(body.to_string()),
+            crate::types::Entry::new(r#"{"keys":["last"]}"#),
+        ])
+        .await
+        .unwrap();
+        let storage =
+            TileStorage::new(opendal::Operator::new(opendal::services::Memory::default()).unwrap());
+        let index = Arc::new(VerifiableIndex::new(Arc::new(
+            crate::vindex::JsonKeysMapFn::new("keys"),
+        )));
+        assert!(
+            run_integration_cycle(&db, &storage, &WorkerConfig::default(), Some(&index))
+                .await
+                .is_err()
+        );
+        assert_eq!(db.get_log_state().await.unwrap().integrated_size.value(), 0);
+        assert_eq!(index.tree_size(), 0);
+    }
+
+    #[tokio::test]
+    async fn bundles_preserve_prefix_across_boundaries() {
+        let storage =
+            TileStorage::new(opendal::Operator::new(opendal::services::Memory::default()).unwrap());
+        let mut from = 0;
+        for to in [1, 255, 256, 300, 768, 769] {
+            let pending: Vec<_> = (from..to)
+                .map(|i: u64| {
+                    let data = EntryData::from(i.to_string());
+                    crate::storage::database::PendingEntry {
+                        index: LogIndex::new(i),
+                        leaf_hash: sigstore_merkle::hash_leaf(data.as_bytes()),
+                        data,
+                    }
+                })
+                .collect();
+            write_entry_bundles(&storage, &pending, TreeSize::new(from), TreeSize::new(to))
+                .await
+                .unwrap();
+            for index in 0..to.div_ceil(256) {
+                let partial = crate::api::paths::partial_tile_size(0, index, to);
+                let bundle = storage
+                    .read_entry_bundle(TileIndex::new(index), PartialSize::new(partial))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    bundle.len(),
+                    if partial == 0 { 256 } else { partial as usize }
+                );
+                for (offset, entry) in bundle.entries.iter().enumerate() {
+                    assert_eq!(
+                        entry.as_bytes(),
+                        (index * 256 + offset as u64).to_string().as_bytes()
+                    );
+                }
+            }
+            from = to;
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_bundle_prefix_is_an_error() {
+        let storage =
+            TileStorage::new(opendal::Operator::new(opendal::services::Memory::default()).unwrap());
+        let entry = crate::storage::database::PendingEntry {
+            index: LogIndex::new(255),
+            data: EntryData::from("last"),
+            leaf_hash: sigstore_merkle::hash_leaf(b"last"),
+        };
+        assert!(
+            write_entry_bundles(&storage, &[entry], TreeSize::new(255), TreeSize::new(256))
+                .await
+                .is_err()
+        );
+    }
+
     fn test_signer(name: &str) -> CheckpointSigner {
-        CheckpointSigner::generate(name)
+        CheckpointSigner::from_seed(name, &[42; 32])
     }
 
     fn empty_root_hash() -> Sha256Hash {
@@ -642,7 +735,11 @@ mod tests {
 
         // Call the external witness
         let client = reqwest::Client::new();
-        let ext_witness = ExternalWitness::new("test-witness", mock_server.uri());
+        let ext_witness = ExternalWitness::new(
+            &test_signer("test-witness").verification_key(),
+            mock_server.uri(),
+        )
+        .unwrap();
         let mut witness_state = ExternalWitnessState::default();
 
         let result =
@@ -681,7 +778,11 @@ mod tests {
 
         // Call the external witness
         let client = reqwest::Client::new();
-        let ext_witness = ExternalWitness::new("test-witness", mock_server.uri());
+        let ext_witness = ExternalWitness::new(
+            &test_signer("test-witness").verification_key(),
+            mock_server.uri(),
+        )
+        .unwrap();
         let mut witness_state = ExternalWitnessState::default();
 
         let result =
@@ -735,8 +836,16 @@ mod tests {
         let mut witness_state = ExternalWitnessState::default();
 
         let ext_witnesses = vec![
-            ExternalWitness::new("witness1", mock_witness1.uri()),
-            ExternalWitness::new("witness2", mock_witness2.uri()),
+            ExternalWitness::new(
+                &test_signer("witness1").verification_key(),
+                mock_witness1.uri(),
+            )
+            .unwrap(),
+            ExternalWitness::new(
+                &test_signer("witness2").verification_key(),
+                mock_witness2.uri(),
+            )
+            .unwrap(),
         ];
 
         // Simulate what publish_checkpoint does for external witnesses
@@ -817,8 +926,16 @@ mod tests {
         let mut witness_state = ExternalWitnessState::default();
 
         let ext_witnesses = vec![
-            ExternalWitness::new("witness1", mock_witness1.uri()),
-            ExternalWitness::new("witness2", mock_witness2.uri()),
+            ExternalWitness::new(
+                &test_signer("witness1").verification_key(),
+                mock_witness1.uri(),
+            )
+            .unwrap(),
+            ExternalWitness::new(
+                &test_signer("witness2").verification_key(),
+                mock_witness2.uri(),
+            )
+            .unwrap(),
         ];
 
         let mut success_count = 0;

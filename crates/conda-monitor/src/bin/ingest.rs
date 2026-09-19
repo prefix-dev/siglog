@@ -190,7 +190,7 @@ fn main() -> anyhow::Result<()> {
         println!("\n=== Verification ===");
         println!("Wait a few seconds for entries to be integrated, then verify with:");
         println!(
-            "  conda-log-verify --log-url {} --subdir {} --filename <package>.conda",
+            "  conda-log-verify --log-url {} --log-origin <trusted-origin> --log-key <trusted-note-key> --subdir {} --filename <package>.conda",
             args.log_url, args.subdir
         );
     }

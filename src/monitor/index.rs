@@ -5,9 +5,8 @@
 //! detecting duplicate or conflicting entries.
 
 use crate::error::Result;
-use sea_orm::{prelude::*, ActiveValue, DatabaseConnection, TransactionTrait};
+use sea_orm::{prelude::*, ActiveValue, ConnectionTrait};
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// An index violation detected during validation.
@@ -250,13 +249,13 @@ impl ContentIndex {
 /// Persistent content index store using Sea ORM.
 ///
 /// Stores content index entries in the database for persistence across restarts.
-pub struct ContentIndexStore {
-    conn: Arc<DatabaseConnection>,
+pub struct ContentIndexStore<'a, C: ConnectionTrait> {
+    conn: &'a C,
 }
 
-impl ContentIndexStore {
-    /// Create a new content index store.
-    pub fn new(conn: Arc<DatabaseConnection>) -> Self {
+impl<'a, C: ConnectionTrait> ContentIndexStore<'a, C> {
+    /// Use the caller's connection or transaction.
+    pub fn new(conn: &'a C) -> Self {
         Self { conn }
     }
 
@@ -269,7 +268,7 @@ impl ContentIndexStore {
         let rows = content_index::Entity::find()
             .filter(content_index::Column::IndexName.eq(index_name))
             .filter(content_index::Column::Origin.eq(origin))
-            .all(&*self.conn)
+            .all(self.conn)
             .await?;
 
         let mut map = HashMap::new();
@@ -291,8 +290,6 @@ impl ContentIndexStore {
             return Ok(());
         }
 
-        let txn = self.conn.begin().await?;
-
         for (key, first_index, value) in entries {
             let model = content_index::ActiveModel {
                 id: ActiveValue::NotSet,
@@ -313,11 +310,10 @@ impl ContentIndexStore {
                     .do_nothing()
                     .to_owned(),
                 )
-                .exec(&txn)
+                .exec(self.conn)
                 .await?;
         }
 
-        txn.commit().await?;
         Ok(())
     }
 }

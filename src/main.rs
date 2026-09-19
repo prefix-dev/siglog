@@ -1,9 +1,8 @@
 //! Siglog - A minimal Tessera-compatible transparency log server.
 
-use axum::extract::DefaultBodyLimit;
 use clap::Parser;
 use siglog::api::handlers::{self, AppState};
-use siglog::api::rate_limit;
+use siglog::api::{self, rate_limit, Mode};
 use siglog::checkpoint::CheckpointSigner;
 use siglog::sequencer::{Sequencer, SequencerConfig};
 use siglog::storage::{Database, TileStorage};
@@ -19,6 +18,10 @@ use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 #[command(name = "siglog")]
 #[command(about = "A minimal Tessera-compatible transparency log server")]
 struct Args {
+    /// API mode. Use separate databases and tile storage for different modes.
+    #[arg(long, env = "LOG_MODE", value_enum, default_value = "tessera")]
+    mode: Mode,
+
     /// Database URL (PostgreSQL: postgres://... or SQLite: sqlite:./path.db)
     #[arg(
         long,
@@ -91,12 +94,16 @@ struct Args {
     #[arg(long, env = "EXTERNAL_WITNESSES")]
     external_witnesses: Option<String>,
 
+    /// Pinned public note keys for external witnesses (comma-separated).
+    #[arg(long, env = "EXTERNAL_WITNESS_KEYS")]
+    external_witness_keys: Option<String>,
+
     /// API key for authenticating write requests (optional).
-    /// When set, the /add endpoint requires an Authorization: Bearer <key> header.
+    /// When set, write endpoints require an Authorization: Bearer <key> header.
     #[arg(long, env = "API_KEY")]
     api_key: Option<String>,
 
-    /// Allow unauthenticated writes to /add.
+    /// Allow unauthenticated writes.
     ///
     /// This is intended for local development and test deployments.
     #[arg(long, env = "ALLOW_PUBLIC_WRITES")]
@@ -135,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
 
     if args.api_key.is_none() && !args.allow_public_writes {
         anyhow::bail!(
-            "API_KEY is required for /add writes. Set --allow-public-writes for local development."
+            "API_KEY is required for writes. Set --allow-public-writes for local development."
         );
     }
 
@@ -143,6 +150,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Connecting to database...");
     let db = Database::connect(&args.database_url).await?;
     db.run_migrations().await?;
+    db.ensure_mode(args.mode).await?;
+    tracing::info!(mode = args.mode.as_str(), "API mode selected");
     tracing::info!("Database connected and migrations complete");
 
     // Initialize storage based on backend selection
@@ -210,21 +219,29 @@ async fn main() -> anyhow::Result<()> {
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| {
                     let parts: Vec<&str> = s.trim().splitn(2, '=').collect();
-                    if parts.len() != 2 {
-                        panic!(
-                            "invalid external witness format: expected 'name=url', got '{}'",
-                            s
-                        );
-                    }
-                    let witness = worker::ExternalWitness::new(parts[0], parts[1]);
+                    anyhow::ensure!(
+                        parts.len() == 2,
+                        "invalid external witness format: expected name=url"
+                    );
+                    let key = args
+                        .external_witness_keys
+                        .as_deref()
+                        .unwrap_or("")
+                        .split(',')
+                        .map(str::trim)
+                        .find(|key| key.split('+').next() == Some(parts[0]))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("missing pinned public key for witness {}", parts[0])
+                        })?;
+                    let witness = worker::ExternalWitness::new(key, parts[1])?;
                     tracing::info!(
                         "External witness configured: {} -> {}",
                         witness.name,
                         witness.url
                     );
-                    witness
+                    Ok(witness)
                 })
-                .collect()
+                .collect::<anyhow::Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
@@ -314,10 +331,10 @@ async fn main() -> anyhow::Result<()> {
     // Build application state
     let mut state = AppState::new(storage, sequencer, db.clone());
     if let Some(api_key) = args.api_key {
-        tracing::info!("API key authentication enabled for /add endpoint");
+        tracing::info!("API key authentication enabled for write endpoints");
         state = state.with_api_key(api_key);
     } else {
-        tracing::warn!("Public unauthenticated writes are enabled for /add endpoint");
+        tracing::warn!("Public unauthenticated writes are enabled for write endpoints");
     }
     if let Some(ref vi) = vindex {
         state = state.with_vindex(vi.clone());
@@ -327,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
     // Configure rate limiting
     let rate_limit_config = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(rate_limit::RATE_LIMIT_PER_SECOND)
+            .period(Duration::from_secs(1) / rate_limit::RATE_LIMIT_PER_SECOND as u32)
             .burst_size(rate_limit::RATE_LIMIT_BURST_SIZE)
             .finish()
             .expect("failed to create rate limit config"),
@@ -341,19 +358,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Build router
-    let mut app = axum::Router::new()
-        .route("/add", axum::routing::post(handlers::add_entry))
-        .route("/checkpoint", axum::routing::get(handlers::get_checkpoint))
-        .route(
-            "/tile/{level}/{*path}",
-            axum::routing::get(handlers::get_tile),
-        )
-        .route(
-            "/tile/entries/{*path}",
-            axum::routing::get(handlers::get_entries),
-        )
-        .route("/health", axum::routing::get(handlers::health))
-        .route("/ready", axum::routing::get(handlers::ready));
+    let mut app = api::router(args.mode, signer);
 
     // Add vindex routes if enabled
     if vindex.is_some() {
@@ -370,29 +375,27 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Vindex API enabled at /vindex/lookup/*");
     }
 
-    let app = app
-        .with_state(state)
-        .layer(DefaultBodyLimit::max(handlers::MAX_ENTRY_SIZE))
-        .layer(governor_layer)
-        .layer(
-            tower_http::trace::TraceLayer::new_for_http()
-                .make_span_with(
-                    tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO),
-                )
-                .on_response(
-                    tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO),
-                ),
-        );
+    let app = app.with_state(state).layer(governor_layer).layer(
+        tower_http::trace::TraceLayer::new_for_http()
+            .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO))
+            .on_response(tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO)),
+    );
 
     // Start server
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     tracing::info!("Server listening on {}", args.listen);
+    let read_prefix = if args.mode == Mode::Rekor {
+        "api/v2/"
+    } else {
+        ""
+    };
     tracing::info!(
         "Environment variables for accessing this log:\n\
          export WRITE_URL=http://{}/\n\
-         export READ_URL=http://{}/",
+         export READ_URL=http://{}/{}",
         args.listen,
-        args.listen
+        args.listen,
+        read_prefix
     );
 
     // Handle shutdown
@@ -404,9 +407,12 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(true);
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal)
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal)
+    .await?;
 
     tracing::info!("Server stopped");
     Ok(())

@@ -12,7 +12,7 @@
 //! SHA256 associated with a filename) are stored verbatim for conflict reporting.
 
 use async_trait::async_trait;
-use sea_orm::DatabaseConnection;
+use sea_orm::ConnectionTrait;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use siglog::error::Result;
@@ -89,8 +89,8 @@ impl Default for CondaMonitor {
 
 #[async_trait]
 impl Monitor for CondaMonitor {
-    async fn load_state(&self, conn: &DatabaseConnection, origin: &str) -> Result<()> {
-        let store = ContentIndexStore::new(Arc::new(conn.clone()));
+    async fn load_state<C: ConnectionTrait>(&self, conn: &C, origin: &str) -> Result<()> {
+        let store = ContentIndexStore::new(conn);
 
         // Load SHA256 index
         let sha256_data = store.load(self.sha256_index.name(), origin).await?;
@@ -175,14 +175,14 @@ impl Monitor for CondaMonitor {
         Ok(ValidationResult::Valid)
     }
 
-    async fn commit_entries(
+    async fn commit_entries<C: ConnectionTrait>(
         &self,
-        conn: &DatabaseConnection,
+        conn: &C,
         origin: &str,
         _from_index: u64,
         _to_index: u64,
     ) -> Result<()> {
-        let store = ContentIndexStore::new(Arc::new(conn.clone()));
+        let store = ContentIndexStore::new(conn);
 
         let sha256_entries = self.sha256_index.pending_entries_snapshot().await;
         if !sha256_entries.is_empty() {
@@ -233,6 +233,7 @@ struct CondaEntry {
 mod tests {
     use super::*;
     use sea_orm::Database;
+    use sea_orm::DatabaseConnection;
     use sea_orm_migration::MigratorTrait;
     use siglog::migration::Migrator;
 

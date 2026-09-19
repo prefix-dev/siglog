@@ -2,7 +2,9 @@
 
 use crate::error::{Error, Result};
 use crate::witness::WitnessedState;
-use sea_orm::{prelude::*, ActiveValue, DatabaseConnection, QuerySelect, TransactionTrait};
+use sea_orm::{
+    prelude::*, sea_query::Expr, ActiveValue, ConnectionTrait, DatabaseConnection, TransactionTrait,
+};
 use sigstore_types::Sha256Hash;
 use std::sync::Arc;
 
@@ -87,60 +89,66 @@ impl WitnessStateStore {
         })
     }
 
-    /// Update the witnessed state for a log.
-    ///
-    /// This is called after successfully verifying a consistency proof.
+    /// Commit only if the state used to verify the proof is still current.
     pub async fn update(
         &self,
-        origin: &str,
+        expected: &WitnessedState,
         size: u64,
         root_hash: Sha256Hash,
         checkpoint: &str,
-    ) -> Result<()> {
-        let txn = self.conn.begin().await?;
+    ) -> Result<bool> {
+        Self::update_in(&*self.conn, expected, size, root_hash, checkpoint).await
+    }
 
-        // Lock and get current state
-        let current = witness_state::Entity::find_by_id(origin.to_string())
-            .lock_exclusive()
-            .one(&txn)
-            .await?;
-
-        match current {
-            Some(model) => {
-                // Prevent size rollback: new size must be >= current size
-                if (size as i64) < model.size {
-                    return Err(Error::InvalidEntry(format!(
-                        "size rollback not allowed: current size {} > new size {}",
-                        model.size, size
-                    )));
-                }
-                // Update existing
-                witness_state::Entity::update(witness_state::ActiveModel {
-                    origin: ActiveValue::Unchanged(origin.to_string()),
-                    size: ActiveValue::Set(size as i64),
-                    root_hash: ActiveValue::Set(root_hash.as_bytes().to_vec()),
-                    checkpoint: ActiveValue::Set(checkpoint.to_string()),
-                    updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-                })
-                .exec(&txn)
-                .await?;
-            }
-            None => {
-                // Insert new
-                witness_state::Entity::insert(witness_state::ActiveModel {
-                    origin: ActiveValue::Set(origin.to_string()),
-                    size: ActiveValue::Set(size as i64),
-                    root_hash: ActiveValue::Set(root_hash.as_bytes().to_vec()),
-                    checkpoint: ActiveValue::Set(checkpoint.to_string()),
-                    updated_at: ActiveValue::Set(chrono::Utc::now().into()),
-                })
-                .exec(&txn)
-                .await?;
-            }
+    pub async fn update_in<C: ConnectionTrait>(
+        conn: &C,
+        expected: &WitnessedState,
+        size: u64,
+        root_hash: Sha256Hash,
+        checkpoint: &str,
+    ) -> Result<bool> {
+        if size < expected.size || (size == expected.size && root_hash != expected.root_hash) {
+            return Err(Error::InvalidEntry(
+                "checkpoint rollback or conflicting root".into(),
+            ));
         }
+        let size = i64::try_from(size).map_err(|_| Error::InvalidEntry("tree too large".into()))?;
+        let result = Self::matching(expected)
+            .col_expr(witness_state::Column::Size, Expr::value(size))
+            .col_expr(
+                witness_state::Column::RootHash,
+                Expr::value(root_hash.as_bytes().to_vec()),
+            )
+            .col_expr(
+                witness_state::Column::Checkpoint,
+                Expr::value(checkpoint.to_string()),
+            )
+            .col_expr(
+                witness_state::Column::UpdatedAt,
+                Expr::value(chrono::Utc::now().fixed_offset()),
+            )
+            .exec(conn)
+            .await?;
+        Ok(result.rows_affected == 1)
+    }
 
-        txn.commit().await?;
-        Ok(())
+    /// Acquire a database writer lock before reading monitor state (also on SQLite).
+    pub async fn lock_in<C: ConnectionTrait>(conn: &C, expected: &WitnessedState) -> Result<bool> {
+        let result = Self::matching(expected)
+            .col_expr(
+                witness_state::Column::Size,
+                Expr::col(witness_state::Column::Size).into(),
+            )
+            .exec(conn)
+            .await?;
+        Ok(result.rows_affected == 1)
+    }
+
+    fn matching(expected: &WitnessedState) -> sea_orm::UpdateMany<witness_state::Entity> {
+        witness_state::Entity::update_many()
+            .filter(witness_state::Column::Origin.eq(&expected.origin))
+            .filter(witness_state::Column::Size.eq(expected.size as i64))
+            .filter(witness_state::Column::RootHash.eq(expected.root_hash.as_bytes().to_vec()))
     }
 
     /// List all witnessed logs.

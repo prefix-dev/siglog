@@ -77,7 +77,7 @@ async fn create_test_storage(leaves: &[Sha256Hash]) -> TileStorage {
     use opendal::services::Memory;
     use opendal::Operator;
 
-    let op = Operator::new(Memory::default()).unwrap().finish();
+    let op = Operator::new(Memory::default()).unwrap();
     let storage = TileStorage::new(op);
 
     // Write all leaves to level 0 tile

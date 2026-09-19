@@ -37,16 +37,19 @@ impl TileStorage {
         // Disable virtual host style for compatibility with R2/MinIO
         builder = builder.disable_config_load();
 
-        let op = Operator::new(builder)?.finish();
+        let op = Operator::new(builder)?;
 
         Ok(Self { op: Arc::new(op) })
     }
 
     /// Create a new tile storage with filesystem backend.
     pub fn new_fs(root: &str) -> Result<Self> {
-        let builder = Fs::default().root(root);
+        let temp = std::path::Path::new(root).join(".atomic-writes");
+        let builder = Fs::default()
+            .root(root)
+            .atomic_write_dir(&temp.to_string_lossy());
 
-        let op = Operator::new(builder)?.finish();
+        let op = Operator::new(builder)?;
 
         Ok(Self { op: Arc::new(op) })
     }
@@ -74,6 +77,7 @@ impl TileStorage {
         self.op
             .write(paths::CHECKPOINT_PATH, data.as_bytes().to_vec())
             .await
+            .map(|_| ())
             .map_err(Into::into)
     }
 
@@ -112,7 +116,11 @@ impl TileStorage {
         let path = paths::tile_path(level.value(), index.value(), partial.value());
         let data = tile.to_bytes();
 
-        self.op.write(&path, data).await.map_err(Into::into)
+        self.op
+            .write(&path, data)
+            .await
+            .map(|_| ())
+            .map_err(Into::into)
     }
 
     // ========================================================================
@@ -148,7 +156,11 @@ impl TileStorage {
         let path = paths::entries_path(index.value(), partial.value());
         let data = bundle.to_bytes()?;
 
-        self.op.write(&path, data).await.map_err(Into::into)
+        self.op
+            .write(&path, data)
+            .await
+            .map(|_| ())
+            .map_err(Into::into)
     }
 
     // ========================================================================
@@ -210,7 +222,7 @@ mod tests {
 
     async fn create_test_storage() -> TileStorage {
         let builder = Memory::default();
-        let op = Operator::new(builder).unwrap().finish();
+        let op = Operator::new(builder).unwrap();
         TileStorage::new(op)
     }
 

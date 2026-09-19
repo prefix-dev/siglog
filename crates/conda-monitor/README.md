@@ -47,10 +47,22 @@ cargo build --release -p conda-monitor
 ```bash
 ./target/release/conda-log-verify \
     --log-url http://localhost:8080 \
+    --log-origin conda.example.com \
+    --log-key "$LOG_PUBLIC_KEY" \
     --subdir linux-64 \
     --filename numpy-1.26.0-py311h123_0.conda \
     --repodata-url https://conda.anaconda.org/conda-forge/linux-64/repodata.json
 ```
+
+Obtain the origin and public note key from a trusted source, not the queried server.
+Verification authenticates the checkpoint and proves inclusion of matching metadata;
+it does not prove freshness, witness quorum, or completeness of the unsigned index.
+Failures return a nonzero exit status, including missing repodata and missing entries.
+Remote repodata is limited to 64 MiB by default; use `--max-repodata-bytes` for larger channels.
+
+Monitor requests reload content state for their origin and atomically persist both
+content indices and witnessed checkpoints. Multiple origins remain isolated, including
+after restart; entry bytes must match the checkpoint's Merkle root before validation.
 
 ## Validation Rules
 

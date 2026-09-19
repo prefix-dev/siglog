@@ -87,29 +87,98 @@ impl Database {
         })
     }
 
+    /// Pin the API mode before starting writers. Existing unmarked logs are Tessera.
+    pub async fn ensure_mode(&self, mode: crate::api::Mode) -> Result<()> {
+        let backend = self.conn.get_database_backend();
+        self.conn.execute(sea_orm::Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO log_config (id, mode) SELECT 1, CASE WHEN next_index > 0 THEN 'tessera' ELSE $1 END FROM log_state WHERE id = 1 ON CONFLICT (id) DO NOTHING",
+            [mode.as_str().into()],
+        )).await?;
+        let row = self
+            .conn
+            .query_one(sea_orm::Statement::from_string(
+                backend,
+                "SELECT mode FROM log_config WHERE id = 1",
+            ))
+            .await?
+            .ok_or_else(|| Error::Internal("missing log configuration".into()))?;
+        let stored: String = row.try_get("", "mode")?;
+        if stored != mode.as_str() {
+            return Err(Error::Config(format!(
+                "log uses {stored} mode, not {}; use a separate database and storage for a new log",
+                mode.as_str()
+            )));
+        }
+        Ok(())
+    }
+
     /// Atomically assign indices to a batch of entries.
     ///
-    /// Returns the sequenced entries with their assigned indices.
-    pub async fn sequence_entries(&self, entries: Vec<Entry>) -> Result<Vec<SequencedEntry>> {
+    /// Rekor duplicates are per-entry errors; other entries in the batch still commit.
+    /// Tessera keeps its original append-every-submission behavior.
+    pub async fn sequence_entries(
+        &self,
+        entries: Vec<Entry>,
+    ) -> Result<Vec<Result<SequencedEntry>>> {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
 
         let txn = self.conn.begin().await?;
 
-        // Lock and get current state
+        // Acquire the writer lock BEFORE reading, including on SQLite where SELECT
+        // FOR UPDATE is unavailable. This serializes independent sequencer processes.
+        txn.execute_unprepared("UPDATE log_state SET next_index = next_index WHERE id = 1")
+            .await?;
+        let backend = txn.get_database_backend();
+        let mode = txn
+            .query_one(sea_orm::Statement::from_string(
+                backend,
+                "SELECT mode FROM log_config WHERE id = 1",
+            ))
+            .await?;
+        let deduplicate = mode
+            .map(|row| row.try_get::<String>("", "mode"))
+            .transpose()?
+            .as_deref()
+            == Some("rekor");
         let state = log_state::Entity::find_by_id(1)
             .lock_exclusive()
             .one(&txn)
             .await?
             .ok_or_else(|| Error::Internal("log state not found".into()))?;
 
-        let start_index = state.next_index as u64;
+        let mut next_index = state.next_index;
         let mut sequenced = Vec::with_capacity(entries.len());
 
-        // Insert pending entries
-        for (offset, entry) in entries.into_iter().enumerate() {
-            let idx = start_index + offset as u64;
+        for entry in entries {
+            if deduplicate {
+                let hash = entry.leaf_hash().as_bytes().to_vec();
+                let existing = txn
+                    .query_one(sea_orm::Statement::from_sql_and_values(
+                        backend,
+                        "SELECT idx FROM rekor_entries WHERE leaf_hash = $1",
+                        [hash.clone().into()],
+                    ))
+                    .await?;
+                if let Some(row) = existing {
+                    sequenced.push(Err(Error::Duplicate(row.try_get::<i64>("", "idx")? as u64)));
+                    continue;
+                }
+                // The primary key is the final guard; reservation and sequencing
+                // commit together, so failures cannot leave orphan reservations.
+                txn.execute(sea_orm::Statement::from_sql_and_values(
+                    backend,
+                    "INSERT INTO rekor_entries (leaf_hash, idx) VALUES ($1, $2)",
+                    [hash.into(), next_index.into()],
+                ))
+                .await?;
+            }
+            let idx = next_index as u64;
+            next_index = next_index
+                .checked_add(1)
+                .ok_or_else(|| Error::IndexFull("log index exhausted".into()))?;
 
             let pending = pending_entries::ActiveModel {
                 idx: ActiveValue::Set(idx as i64),
@@ -120,14 +189,13 @@ impl Database {
 
             pending_entries::Entity::insert(pending).exec(&txn).await?;
 
-            sequenced.push(SequencedEntry::new(LogIndex::new(idx), entry));
+            sequenced.push(Ok(SequencedEntry::new(LogIndex::new(idx), entry)));
         }
 
         // Update next_index
-        let new_next_index = start_index + sequenced.len() as u64;
         log_state::Entity::update(log_state::ActiveModel {
             id: ActiveValue::Unchanged(1),
-            next_index: ActiveValue::Set(new_next_index as i64),
+            next_index: ActiveValue::Set(next_index),
             integrated_size: ActiveValue::Unchanged(state.integrated_size),
             root_hash: ActiveValue::Unchanged(state.root_hash),
         })

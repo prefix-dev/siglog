@@ -50,6 +50,9 @@ pub enum Error {
 
     #[error("Unauthorized")]
     Unauthorized,
+
+    #[error("Entry already exists at index {0}")]
+    Duplicate(u64),
 }
 
 impl IntoResponse for Error {
@@ -57,6 +60,7 @@ impl IntoResponse for Error {
         let (status, message) = match &self {
             Error::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             Error::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
+            Error::Duplicate(_) => (StatusCode::CONFLICT, self.to_string()),
             Error::InvalidPath(_) | Error::InvalidEntry(_) => {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
