@@ -105,7 +105,7 @@ impl<M: Monitor> MonitoringWitness<M> {
         &self,
         request: AddCheckpointRequest,
     ) -> std::result::Result<CheckpointSignature, MonitorError> {
-        // ponytail: one in-memory monitor; serialize requests and reload per origin.
+        // One in-memory monitor; serialize requests and reload per origin.
         // Use separate per-origin monitor instances if throughput requires it.
         let _guard = self
             .request_lock

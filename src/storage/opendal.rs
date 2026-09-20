@@ -167,6 +167,55 @@ impl TileStorage {
     // Raw bytes operations (for serving HTTP responses directly)
     // ========================================================================
 
+    /// Write a new import object, or verify an identical object when resuming.
+    /// Callers must hold the import database lock; this is not a cross-database
+    /// compare-and-swap. Never share a storage namespace between log databases.
+    pub(crate) async fn write_import_object(
+        &self,
+        path: &str,
+        data: Vec<u8>,
+        resume: bool,
+    ) -> Result<bool> {
+        if let Some(existing) = self.read_raw(path).await? {
+            if resume && existing == data {
+                return Ok(false);
+            }
+            return Err(Error::Config(format!(
+                "import object already exists or differs: {path}; refusing to overwrite"
+            )));
+        }
+        self.op.write(path, data).await?;
+        Ok(true)
+    }
+
+    /// OpenDAL fsyncs file contents before rename. Flush directory entries too
+    /// before the importer commits the database, including newly created parents.
+    pub(crate) async fn sync_import(&self) -> Result<()> {
+        #[cfg(unix)]
+        if self.op.info().scheme() == "fs" {
+            let root = std::path::PathBuf::from(self.op.info().root());
+            tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                fn sync_tree(path: &std::path::Path) -> std::io::Result<()> {
+                    for entry in std::fs::read_dir(path)? {
+                        let entry = entry?;
+                        if entry.file_type()?.is_dir() {
+                            sync_tree(&entry.path())?;
+                        }
+                    }
+                    std::fs::File::open(path)?.sync_all()
+                }
+                sync_tree(&root)?;
+                for parent in root.ancestors().skip(1) {
+                    std::fs::File::open(parent)?.sync_all()?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))??;
+        }
+        Ok(())
+    }
+
     /// Read raw bytes from a path.
     pub async fn read_raw(&self, path: &str) -> Result<Option<Vec<u8>>> {
         match self.op.read(path).await {

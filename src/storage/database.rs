@@ -90,14 +90,14 @@ impl Database {
     /// Pin the API mode before starting writers. Existing unmarked logs are Tessera.
     pub async fn ensure_mode(&self, mode: crate::api::Mode) -> Result<()> {
         let backend = self.conn.get_database_backend();
-        self.conn.execute(sea_orm::Statement::from_sql_and_values(
+        self.conn.execute_raw(sea_orm::Statement::from_sql_and_values(
             backend,
             "INSERT INTO log_config (id, mode) SELECT 1, CASE WHEN next_index > 0 THEN 'tessera' ELSE $1 END FROM log_state WHERE id = 1 ON CONFLICT (id) DO NOTHING",
             [mode.as_str().into()],
         )).await?;
         let row = self
             .conn
-            .query_one(sea_orm::Statement::from_string(
+            .query_one_raw(sea_orm::Statement::from_string(
                 backend,
                 "SELECT mode FROM log_config WHERE id = 1",
             ))
@@ -110,6 +110,49 @@ impl Database {
                 mode.as_str()
             )));
         }
+        Ok(())
+    }
+
+    /// Hold the database writer lock throughout an offline import. The caller
+    /// must keep the server stopped and use a dedicated storage namespace.
+    pub(crate) async fn begin_import(&self) -> Result<sea_orm::DatabaseTransaction> {
+        self.ensure_mode(crate::api::Mode::Tessera).await?;
+        let txn = self.conn.begin().await?;
+        txn.execute_unprepared("UPDATE log_state SET next_index = next_index WHERE id = 1")
+            .await?;
+        let state = log_state::Entity::find_by_id(1)
+            .one(&txn)
+            .await?
+            .ok_or_else(|| Error::Internal("log state not found".into()))?;
+        if state.next_index != 0
+            || state.integrated_size != 0
+            || state.root_hash.is_some()
+            || pending_entries::Entity::find().one(&txn).await?.is_some()
+        {
+            return Err(Error::Config(
+                "bulk import requires an empty log; a completed import cannot be repeated".into(),
+            ));
+        }
+        Ok(txn)
+    }
+
+    /// Commit only after every imported object has been written and verified.
+    pub(crate) async fn finish_import(
+        txn: sea_orm::DatabaseTransaction,
+        size: TreeSize,
+        root: Sha256Hash,
+    ) -> Result<()> {
+        let size = i64::try_from(size.value())
+            .map_err(|_| Error::InvalidEntry("import exceeds maximum log size".into()))?;
+        log_state::Entity::update(log_state::ActiveModel {
+            id: ActiveValue::Unchanged(1),
+            next_index: ActiveValue::Set(size),
+            integrated_size: ActiveValue::Set(size),
+            root_hash: ActiveValue::Set(Some(root.as_bytes().to_vec())),
+        })
+        .exec(&txn)
+        .await?;
+        txn.commit().await?;
         Ok(())
     }
 
@@ -133,7 +176,7 @@ impl Database {
             .await?;
         let backend = txn.get_database_backend();
         let mode = txn
-            .query_one(sea_orm::Statement::from_string(
+            .query_one_raw(sea_orm::Statement::from_string(
                 backend,
                 "SELECT mode FROM log_config WHERE id = 1",
             ))
@@ -156,7 +199,7 @@ impl Database {
             if deduplicate {
                 let hash = entry.leaf_hash().as_bytes().to_vec();
                 let existing = txn
-                    .query_one(sea_orm::Statement::from_sql_and_values(
+                    .query_one_raw(sea_orm::Statement::from_sql_and_values(
                         backend,
                         "SELECT idx FROM rekor_entries WHERE leaf_hash = $1",
                         [hash.clone().into()],
@@ -168,7 +211,7 @@ impl Database {
                 }
                 // The primary key is the final guard; reservation and sequencing
                 // commit together, so failures cannot leave orphan reservations.
-                txn.execute(sea_orm::Statement::from_sql_and_values(
+                txn.execute_raw(sea_orm::Statement::from_sql_and_values(
                     backend,
                     "INSERT INTO rekor_entries (leaf_hash, idx) VALUES ($1, $2)",
                     [hash.into(), next_index.into()],

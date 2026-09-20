@@ -129,7 +129,7 @@ impl CheckpointSigner {
     /// Generate a new random signer (for testing).
     pub fn generate(name: impl Into<String>) -> Self {
         let name = SignerName::new(name.into());
-        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = SigningKey::generate(&mut rand::rng());
         let verifying_key = signing_key.verifying_key();
         let key_id = compute_key_id(&name.0, &verifying_key);
 

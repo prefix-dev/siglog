@@ -15,7 +15,7 @@ COPY src ./src
 COPY crates ./crates
 
 # Build release binary
-RUN cargo build --locked --release --bin siglog
+RUN cargo build --locked --release --bin siglog --bin siglog-import
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y \
 
 # Copy binary from builder
 COPY --from=builder /app/target/release/siglog /usr/local/bin/siglog
+COPY --from=builder /app/target/release/siglog-import /usr/local/bin/siglog-import
 
 # Create data directory
 RUN groupadd --gid 10001 siglog && useradd --uid 10001 --gid siglog --no-create-home siglog \

@@ -199,7 +199,13 @@ impl<'a> TreeBuilder<'a> {
             // Try to load existing tile:
             // - If previous was partial, load that partial tile
             // - If previous was full (or tile didn't exist), try loading full tile
-            let mut tile = if prev_partial.value() > 0 {
+            // A future full tile can exist after an interrupted import. Do not
+            // let its unverified suffix contaminate a smaller partial tile.
+            let existed =
+                key.index < (self.from_size >> (key.level * TILE_HEIGHT)).div_ceil(TILE_WIDTH);
+            let mut tile = if !existed {
+                HashTile::new()
+            } else if prev_partial.value() > 0 {
                 // Previous tile was partial, load it
                 self.storage
                     .read_tile(level, index, prev_partial)

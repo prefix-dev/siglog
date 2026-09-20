@@ -125,7 +125,7 @@ impl WitnessStateStore {
         let result = Self::matching(expected)
             .col_expr(
                 witness_state::Column::Size,
-                Expr::col(witness_state::Column::Size).into(),
+                Expr::col(witness_state::Column::Size),
             )
             .exec(conn)
             .await?;

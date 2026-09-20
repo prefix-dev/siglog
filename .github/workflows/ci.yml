@@ -14,28 +14,20 @@ jobs:
     name: Dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-audit --locked
       - name: Audit dependencies
-        run: |
-          # rsa is only in SQLx's disabled MySQL lockfile graph. Never allow
-          # this timing-side-channel exception to cover an enabled dependency.
-          cargo tree --color never --locked --workspace --all-features --edges normal --prefix none > /tmp/dependencies.txt
-          if grep -Eq '^rsa v' /tmp/dependencies.txt; then
-            echo 'rsa is enabled: revisit RUSTSEC-2023-0071 before shipping'
-            exit 1
-          fi
-          cargo audit --ignore RUSTSEC-2023-0071
+        run: cargo audit
 
   fmt:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
@@ -47,7 +39,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
@@ -60,7 +52,7 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
@@ -73,17 +65,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.1.0
       - run: cargo build --locked --bin witness
       - name: Verify witness protocol and cosignatures
         working-directory: witness-conformance
         run: uv run --locked pytest --entrypoint=../target/debug/witness -v --junitxml=results.xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: witness-conformance-results
@@ -108,14 +100,14 @@ jobs:
     env:
       SIGLOG_TEST_POSTGRES_URL: postgres://postgres:test@localhost:5432/siglog_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --all
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: rekor-conformance/go.mod
           cache-dependency-path: rekor-conformance/go.sum

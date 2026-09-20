@@ -12,6 +12,7 @@ pub mod api;
 pub mod checkpoint;
 pub mod client;
 pub mod error;
+pub mod import;
 pub mod merkle;
 pub mod migration;
 pub mod monitor;
